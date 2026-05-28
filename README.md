@@ -4,13 +4,17 @@ A graduate course project applying Bayesian machine learning to automated diseas
 
 ## Project Overview
 
-This project constructs a Bayesian probit/logistic regression model to predict the **10-year risk of cardiovascular disease (CVD)** in patients. We compare:
+This project constructs Bayesian probit/logistic regression models to predict the **10-year risk of cardiovascular disease (CVD)**. We compare:
 
 - Classical (frequentist) logistic regression
-- Bayesian logistic regression (with informative/non-informative priors)
+- Bayesian logistic regression
 - Bayesian probit regression
 
-The Bayesian approach provides posterior distributions over model parameters, enabling principled uncertainty quantification in clinical predictions.
+Key strengths of this workflow:
+- Leakage-safe preprocessing (split first, fit transforms on train only)
+- Full posterior predictive risk distributions (not point-estimate-only prediction)
+- Clinical interpretability via Bayesian Odds Ratios (logistic only)
+- Cost-sensitive Bayesian decision thresholding for imbalanced diagnosis
 
 ## Dataset
 
@@ -80,16 +84,45 @@ jupyter notebook
 
 ## Methodology
 
-1. **EDA**: Explore class imbalance, feature distributions, correlations
-2. **Preprocessing**: Handle missing values, standardize features, train/test split
+1. **EDA**:
+   - Explore class imbalance, feature distributions, correlations
+   - Diagnose multicollinearity using VIF (for prior/feature strategy)
+2. **Leakage-safe preprocessing**:
+   - Split raw data into train/test with stratification
+   - Fit MICE imputer on train only, transform train/test
+   - Fit scaler on imputed train only, transform train/test
 3. **Bayesian Modeling**:
-   - Prior specification (weakly informative priors on coefficients)
-   - MCMC sampling via NUTS (No-U-Turn Sampler) using PyMC
-   - Posterior predictive checks
-4. **Evaluation**: ROC-AUC, accuracy, calibration plots, comparison with frequentist baseline
+   - Logistic and probit likelihoods with weakly informative priors
+   - MCMC sampling via NUTS (4 chains for final report)
+   - Log-likelihood computation for WAIC/PSIS-LOO comparison
+   - Prior sensitivity analysis (e.g., Normal(0, 2.5) vs Normal(0, 0.5))
+4. **Posterior predictive inference**:
+   - Use `sample_posterior_predictive(var_names=["p"])` to obtain continuous risk
+   - Report mean risk and 95% HDI for individual patients
+5. **Evaluation under imbalance**:
+   - ROC-AUC, PR-AUC, Brier score, calibration curves
+6. **Clinical decision analysis**:
+   - Asymmetric loss (false negative cost > false positive cost)
+   - Bayes-optimal threshold \(p^* = \frac{C_{FP}}{C_{FP}+C_{FN}}\)
+
+## Reproducible Run Order
+
+Run notebooks in this exact order:
+
+1. `notebooks/01_eda.ipynb`
+2. `notebooks/02_preprocessing.ipynb`
+3. `notebooks/03_bayesian_logistic.ipynb` (long runtime; generates `data/idata_*.nc`)
+4. `notebooks/04_evaluation.ipynb`
+
+## Interpretation Notes
+
+- **Odds Ratios (OR)** are reported for **logistic** coefficients only: \(OR=\exp(\beta)\).
+- For **probit**, coefficients are interpreted on the latent-normal scale (not OR).
+- If PPD is accidentally sampled on `y_obs` instead of `p`, uncertainty intervals collapse to binary outcomes; this project explicitly avoids that pitfall.
 
 ## References
 
 - Framingham Heart Study: https://www.framinghamheartstudy.org/
 - PyMC documentation: https://www.pymc.io/
 - Gelman et al., *Bayesian Data Analysis* (3rd ed.)
+- Gelman, A., Jakulin, A., Pittau, M. G., & Su, Y.-S. (2008). *A weakly informative default prior distribution for logistic and other regression models.*
