@@ -13,6 +13,26 @@ from sklearn.impute import IterativeImputer
 DATA_PATH = "data/framingham.csv"
 TARGET_COL = "TenYearCHD"
 RANDOM_STATE = 42
+BINARY_COLS = [
+    "male",
+    "currentSmoker",
+    "BPMeds",
+    "prevalentStroke",
+    "prevalentHyp",
+    "diabetes",
+]
+ORDINAL_BOUNDS = {
+    "education": (1, 4),
+}
+NONNEGATIVE_COLS = [
+    "cigsPerDay",
+    "totChol",
+    "sysBP",
+    "diaBP",
+    "BMI",
+    "heartRate",
+    "glucose",
+]
 
 
 def load_data(path: str = DATA_PATH) -> pd.DataFrame:
@@ -27,7 +47,7 @@ def summarize_missing(df: pd.DataFrame) -> pd.Series:
 
 def make_imputer(
     max_iter: int = 20,
-    sample_posterior: bool = True,
+    sample_posterior: bool = False,
 ) -> IterativeImputer:
     return IterativeImputer(
         random_state=RANDOM_STATE,
@@ -37,13 +57,38 @@ def make_imputer(
     )
 
 
+def postprocess_imputed_features(X: pd.DataFrame) -> pd.DataFrame:
+    """
+    Restore simple domain constraints after regression-based imputation.
+
+    IterativeImputer can produce fractional values for binary/ordinal variables.
+    Rounding these columns keeps the design matrix clinically interpretable while
+    preserving the train-only fitting discipline.
+    """
+    X = X.copy()
+
+    for col in BINARY_COLS:
+        if col in X.columns:
+            X[col] = X[col].round().clip(0, 1)
+
+    for col, (lower, upper) in ORDINAL_BOUNDS.items():
+        if col in X.columns:
+            X[col] = X[col].round().clip(lower, upper)
+
+    for col in NONNEGATIVE_COLS:
+        if col in X.columns:
+            X[col] = X[col].clip(lower=0)
+
+    return X
+
+
 def impute_missing(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Impute missing values using IterativeImputer (MICE-like).
+    Impute missing values using IterativeImputer (MICE-like single imputation).
 
     Notes:
     - We impute features only (not the target).
-    - `sample_posterior=True` introduces stochasticity for multiple imputation.
+    - Set `sample_posterior=True` in `make_imputer` for sensitivity checks.
     """
     df = df.copy()
 
@@ -56,6 +101,7 @@ def impute_missing(df: pd.DataFrame) -> pd.DataFrame:
     imputer = make_imputer()
     X_imp = imputer.fit_transform(X)
     X_imp = pd.DataFrame(X_imp, columns=X.columns, index=df.index)
+    X_imp = postprocess_imputed_features(X_imp)
 
     return pd.concat([X_imp, y], axis=1)
 
@@ -76,12 +122,46 @@ def split_and_scale(X, y, test_size: float = 0.2):
     return X_train_sc, X_test_sc, y_train.values, y_test.values, scaler
 
 
-def full_pipeline(path: str = DATA_PATH, test_size: float = 0.2):
+def compute_vif(X: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute variance inflation factors on centered/scaled predictors.
+
+    VIF should include an intercept and should not be computed on raw,
+    uncentered clinical measurements; otherwise variables with large positive
+    means can look artificially collinear.
+    """
+    from statsmodels.stats.outliers_influence import variance_inflation_factor
+    import statsmodels.api as sm
+
+    X_scaled = pd.DataFrame(
+        StandardScaler().fit_transform(X),
+        columns=X.columns,
+        index=X.index,
+    )
+    X_with_const = sm.add_constant(X_scaled, has_constant="add")
+    values = X_with_const.values
+    rows = []
+    for idx, feature in enumerate(X_scaled.columns, start=1):
+        rows.append(
+            {
+                "feature": feature,
+                "vif": variance_inflation_factor(values, idx),
+            }
+        )
+    return pd.DataFrame(rows).sort_values("vif", ascending=False).reset_index(drop=True)
+
+
+def full_pipeline(
+    path: str = DATA_PATH,
+    test_size: float = 0.2,
+    imputer_sample_posterior: bool = False,
+):
     """
     Leakage-safe preprocessing pipeline:
     1) Train/test split on raw data (stratified)
-    2) Fit MICE imputer on X_train only; transform X_train and X_test
-    3) Fit scaler on imputed X_train; transform both sets
+    2) Fit IterativeImputer on X_train only; transform X_train and X_test
+    3) Restore binary/ordinal/nonnegative domain constraints after imputation
+    4) Fit scaler on imputed X_train; transform both sets
     """
     df = load_data(path)
     if TARGET_COL not in df.columns:
@@ -98,9 +178,19 @@ def full_pipeline(path: str = DATA_PATH, test_size: float = 0.2):
         stratify=y,
     )
 
-    imputer = make_imputer()
-    X_train_imp = imputer.fit_transform(X_train_raw)
-    X_test_imp = imputer.transform(X_test_raw)
+    imputer = make_imputer(sample_posterior=imputer_sample_posterior)
+    X_train_imp = pd.DataFrame(
+        imputer.fit_transform(X_train_raw),
+        columns=X_raw.columns,
+        index=X_train_raw.index,
+    )
+    X_test_imp = pd.DataFrame(
+        imputer.transform(X_test_raw),
+        columns=X_raw.columns,
+        index=X_test_raw.index,
+    )
+    X_train_imp = postprocess_imputed_features(X_train_imp)
+    X_test_imp = postprocess_imputed_features(X_test_imp)
 
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train_imp)

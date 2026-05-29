@@ -3,10 +3,21 @@ Bayesian logistic and probit regression models using PyMC.
 """
 
 import numpy as np
-import pymc as pm
+
+
+def _require_pymc():
+    try:
+        import pymc as pm
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "PyMC is required for Bayesian model fitting. Install project "
+            "dependencies with: python -m pip install -r requirements.txt"
+        ) from exc
+    return pm
 
 
 def _make_beta_prior(
+    pm,
     name: str,
     n_features: int,
     prior_family: str = "normal",
@@ -28,13 +39,19 @@ def build_bayesian_logistic(
 ):
     """
     Bayesian logistic regression with configurable coefficient priors.
+
+    `model_name` is kept as a reporting label. It is intentionally not passed
+    into `pm.Model(name=...)`, because PyMC model names can prefix variables and
+    make downstream calls such as `var_names=["beta", "p"]` fragile.
     """
+    pm = _require_pymc()
     n_features = X_train.shape[1]
-    with pm.Model(name=model_name) as model:
+    with pm.Model() as model:
         X = pm.Data("X", X_train)
         # Priors
         alpha = pm.Normal("alpha", mu=0, sigma=1)
         beta = _make_beta_prior(
+            pm,
             "beta",
             n_features=n_features,
             prior_family=prior_family,
@@ -44,7 +61,7 @@ def build_bayesian_logistic(
         # Linear predictor
         eta = alpha + pm.math.dot(X, beta)
 
-        # Likelihood — logistic link
+        # Logistic link likelihood
         p = pm.Deterministic("p", pm.math.sigmoid(eta))
         y_obs = pm.Bernoulli("y_obs", p=p, observed=y_train)
 
@@ -60,12 +77,16 @@ def build_bayesian_probit(
 ):
     """
     Bayesian probit regression: uses the normal CDF (Phi) as the link function.
+
+    `model_name` is kept as a reporting label; see `build_bayesian_logistic`.
     """
+    pm = _require_pymc()
     n_features = X_train.shape[1]
-    with pm.Model(name=model_name) as model:
+    with pm.Model() as model:
         X = pm.Data("X", X_train)
         alpha = pm.Normal("alpha", mu=0, sigma=1)
         beta = _make_beta_prior(
+            pm,
             "beta",
             n_features=n_features,
             prior_family=prior_family,
@@ -87,14 +108,17 @@ def sample_model(
     tune: int = 2000,
     chains: int = 4,
     target_accept: float = 0.95,
+    random_seed: int = 42,
 ):
     """Run NUTS sampling and return InferenceData with log-likelihood."""
+    pm = _require_pymc()
     with model:
         idata = pm.sample(
             draws=draws,
             tune=tune,
             chains=chains,
             target_accept=target_accept,
+            random_seed=random_seed,
             return_inferencedata=True,
             progressbar=True,
         )
@@ -110,7 +134,16 @@ def posterior_predict(model, idata, X_new: np.ndarray, draws: int | None = None)
     Sampling only y_obs would yield 0/1 draws and cannot provide continuous
     patient-level risk intervals.
     """
+    pm = _require_pymc()
+    idata_for_prediction = idata
+    if draws is not None:
+        idata_for_prediction = idata.sel(draw=slice(0, draws - 1))
+
     with model:
         pm.set_data({"X": X_new})
-        ppc = pm.sample_posterior_predictive(idata, var_names=["p"], random_seed=42, draws=draws)
+        ppc = pm.sample_posterior_predictive(
+            idata_for_prediction,
+            var_names=["p"],
+            random_seed=42,
+        )
     return ppc
