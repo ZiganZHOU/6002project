@@ -299,12 +299,14 @@ def bayesian_optimize_triage_policy(
     n_candidates: int = 2000,
 ):
     """
-    Tune triage-policy parameters with Gaussian-process Bayesian optimization.
+    Calibrate triage-policy parameters with Gaussian-process Bayesian optimization.
 
     Optimized parameters are q_low, q_high, and the internal referral cost used
     by the triage rule. The objective is validation-set clinical cost plus an
-    optional abstention-rate penalty. MCMC is not repeated; optimization uses
-    saved posterior risk samples.
+    optional abstention-rate penalty. The objective is a gray-box policy score:
+    its cost structure is explicit, but the realized value depends on discrete
+    low/high/refer decisions over held-out patients. MCMC is not repeated;
+    optimization uses saved posterior risk samples.
     """
     import pandas as pd
     import warnings

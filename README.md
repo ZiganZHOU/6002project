@@ -33,10 +33,12 @@ application of Bayesian logistic/probit regression:
 2. **Posterior expected-loss triage with reject option**: the final decision is
    not forced into low/high risk. The model can output `refer` when posterior
    risk is too uncertain or expected loss favors additional testing.
-3. **Bayesian optimization for triage policy tuning**: a Gaussian-process
+3. **Bayesian optimization for triage policy calibration**: a Gaussian-process
    surrogate with a lower-confidence-bound acquisition function tunes the
    triage parameters `q_low`, `q_high`, and internal referral cost using saved
-   posterior risk samples, without rerunning MCMC.
+   posterior risk samples. This treats the final clinical decision rule as a
+   downstream policy-calibration problem, rather than rerunning MCMC or tuning
+   PyMC model hyperparameters.
 
 ## Dataset
 
@@ -136,8 +138,8 @@ Bayesian-optimization history, and triage decisions are written to `outputs/`.
    - Asymmetric clinical loss with threshold
      `C_FP / (C_FP + C_FN)`.
    - Three-action posterior triage: `low`, `high`, and `refer`.
-   - Bayesian optimization of triage-policy parameters on held-out posterior
-     risk samples.
+   - Bayesian optimization of downstream triage-policy parameters on held-out
+     posterior risk samples.
 
 ## Baseline Sanity Check
 

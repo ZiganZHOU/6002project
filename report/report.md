@@ -259,12 +259,24 @@ If neither condition is met, the patient is assigned to `refer`. This creates a
 clinically realistic reject option: the model can explicitly say that more
 testing is preferable to an overconfident binary label.
 
-### 7.2 Bayesian Optimization for Triage Policy Tuning
+### 7.2 Bayesian Optimization for Triage Policy Calibration
 
-The project also adds Bayesian optimization, but it is used where it is
-computationally appropriate: it tunes the decision policy after MCMC has already
-produced posterior risk samples. It does not rerun PyMC at each optimization
-step.
+The project uses Bayesian optimization as a downstream policy-calibration
+method. After MCMC has produced posterior risk samples, each candidate triage
+policy can be evaluated by replaying its `low`, `high`, and `refer` decisions
+on held-out patients. The Bayesian model is therefore sampled once, and the
+optimization step adjusts only the decision policy that acts on the posterior
+risk distribution.
+
+This choice is appropriate because the policy objective is not a smooth model
+training loss. It combines asymmetric clinical error costs, a referral penalty,
+posterior confidence cutoffs, and discrete triage actions. The loss formula is
+explicit, but the final validation cost depends on threshold-based decisions
+over observed patients, so the objective is best treated as a gray-box
+calibration problem: partly specified by the clinical decision rule and partly
+measured empirically on held-out posterior risk samples. Bayesian optimization
+provides a sample-efficient way to search this policy space without rerunning
+the expensive Bayesian inference step.
 
 The tuned policy parameters are:
 
@@ -285,8 +297,10 @@ The validation objective is:
 
 A Gaussian-process surrogate model is fit to evaluated policy settings, and a
 lower-confidence-bound acquisition rule proposes the next policy to test. This
-turns the final clinical decision rule into a tunable Bayesian decision policy
-rather than a hand-picked threshold.
+turns the final clinical decision rule into a tunable Bayesian decision policy:
+the statistical model estimates patient risk, while the optimization layer
+calibrates how that risk should be converted into an actionable triage
+recommendation.
 
 ## 8. Limitations
 
@@ -295,9 +309,9 @@ rather than a hand-picked threshold.
 - The current imputation is a single imputed dataset; full multiple imputation
   would better propagate missing-data uncertainty.
 - Logistic/probit models assume linear effects in the standardized predictors.
-- The Bayesian optimization step tunes the triage policy, not the MCMC model
-  itself; this avoids repeated expensive posterior sampling but means prior
-  hyperparameters are not optimized by BO.
+- The Bayesian optimization step calibrates the triage policy, not the MCMC
+  model itself; this avoids repeated expensive posterior sampling but means
+  prior hyperparameters are not optimized by BO.
 - The project is educational and is not suitable for clinical deployment.
 
 ## 9. Conclusion
@@ -305,9 +319,10 @@ rather than a hand-picked threshold.
 The project implements a complete Bayesian binary-classification workflow for
 cardiovascular risk prediction: leakage-safe preprocessing, Bayesian logit and
 probit models, grouped hierarchical shrinkage, posterior predictive
-uncertainty, model comparison, Bayesian optimization of triage policy, and
-expected-loss decision rules with a reject option. This matches the Bayesian
-machine learning project theme while adding clear method-level contributions.
+uncertainty, model comparison, Bayesian optimization of triage-policy
+calibration, and expected-loss decision rules with a reject option. This
+matches the Bayesian machine learning project theme while adding clear
+method-level contributions.
 
 ## References
 

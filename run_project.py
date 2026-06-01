@@ -1,5 +1,5 @@
 """
-End-to-end and stepwise runner for the Bayesian CHD diagnosis project.
+End-to-end and stepwise runner for the Bayesian CHD risk-prediction project.
 
 Examples
 --------
@@ -618,7 +618,7 @@ def run_evaluate(data_path: Path, output_dir: Path, args: argparse.Namespace) ->
 
 
 def run_optimize(data_path: Path, output_dir: Path, args: argparse.Namespace) -> None:
-    print("[optimize] Tuning posterior triage policy with Bayesian optimization.")
+    print("[optimize] Calibrating posterior triage policy with Bayesian optimization.")
     ensure_data(data_path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -640,6 +640,17 @@ def run_optimize(data_path: Path, output_dir: Path, args: argparse.Namespace) ->
         random_state=args.random_seed,
         stratify=y_true,
     )
+    split_table = pd.DataFrame(
+        {
+            "heldout_prediction_index": indices,
+            "policy_split": np.where(
+                np.isin(indices, validation_idx),
+                "validation",
+                "final",
+            ),
+        }
+    )
+    split_table.to_csv(output_dir / "triage_policy_split_indices.csv", index=False)
 
     best, history = bayesian_optimize_triage_policy(
         p_samples[:, validation_idx],
@@ -685,6 +696,11 @@ def run_optimize(data_path: Path, output_dir: Path, args: argparse.Namespace) ->
                 "eval_referral_cost": args.eval_referral_cost,
                 "abstention_penalty": args.abstention_penalty,
             },
+            "policy_split": {
+                "validation_n": int(len(validation_idx)),
+                "final_n": int(len(final_idx)),
+                "final_fraction": float(args.policy_test_size),
+            },
             "best_validation_policy": best,
             "final_split_metrics": final_metrics,
         },
@@ -696,7 +712,7 @@ def run_optimize(data_path: Path, output_dir: Path, args: argparse.Namespace) ->
     ax.plot(history["iteration"], best_so_far, color="tomato", label="Best so far")
     ax.set_xlabel("Bayesian optimization iteration")
     ax.set_ylabel("Validation objective")
-    ax.set_title("Triage Policy Bayesian Optimization")
+    ax.set_title("Triage Policy Calibration via Bayesian Optimization")
     ax.legend()
     fig.tight_layout()
     fig.savefig(output_dir / "triage_bayesopt_history.png", dpi=180)
