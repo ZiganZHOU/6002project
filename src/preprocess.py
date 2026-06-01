@@ -33,6 +33,13 @@ NONNEGATIVE_COLS = [
     "heartRate",
     "glucose",
 ]
+FEATURE_GROUPS = {
+    "demographic": ["male", "age", "education"],
+    "behavioral": ["currentSmoker", "cigsPerDay"],
+    "medical_history": ["BPMeds", "prevalentStroke", "prevalentHyp", "diabetes"],
+    "vitals": ["sysBP", "diaBP", "BMI", "heartRate"],
+    "labs": ["totChol", "glucose"],
+}
 
 
 def load_data(path: str = DATA_PATH) -> pd.DataFrame:
@@ -110,6 +117,32 @@ def get_features_target(df: pd.DataFrame):
     X = df.drop(columns=[TARGET_COL])
     y = df[TARGET_COL]
     return X, y
+
+
+def feature_group_index(feature_names: list[str]):
+    """
+    Map feature names to clinically motivated group indices.
+
+    Returns
+    -------
+    group_names:
+        Ordered group labels.
+    group_idx:
+        Integer group id for each feature in `feature_names`.
+    """
+    group_lookup = {
+        feature: group_name
+        for group_name, features in FEATURE_GROUPS.items()
+        for feature in features
+    }
+    group_names = list(FEATURE_GROUPS)
+    group_id = {group_name: idx for idx, group_name in enumerate(group_names)}
+    group_idx = []
+    for feature in feature_names:
+        if feature not in group_lookup:
+            raise ValueError(f"Missing feature group assignment for: {feature}")
+        group_idx.append(group_id[group_lookup[feature]])
+    return group_names, np.asarray(group_idx, dtype="int64")
 
 
 def split_and_scale(X, y, test_size: float = 0.2):

@@ -14,6 +14,7 @@ Run a specific step:
     python run_project.py baseline
     python run_project.py bayes --draws 1000 --tune 1000 --chains 4
     python run_project.py evaluate
+    python run_project.py optimize
 """
 
 from __future__ import annotations
@@ -35,18 +36,22 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 
 from src.evaluate import (
+    bayesian_optimize_triage_policy,
     expected_loss_threshold,
     logistic_odds_ratio_summary,
     metric_summary,
     plot_calibration,
     plot_pr_curves,
     plot_roc_curves,
+    posterior_expected_loss_triage,
     threshold_cost_curve,
+    triage_metrics,
 )
 from src.evaluate import plot_posterior_coefs
 from src.model import (
     build_bayesian_logistic,
     build_bayesian_probit,
+    build_hierarchical_logistic,
     posterior_predict,
     sample_model,
 )
@@ -54,6 +59,7 @@ from src.preprocess import (
     RANDOM_STATE,
     TARGET_COL,
     compute_vif,
+    feature_group_index,
     full_pipeline,
     load_data,
     make_imputer,
@@ -283,7 +289,8 @@ def run_bayes(data_path: Path, output_dir: Path, args: argparse.Namespace) -> No
 
     import arviz as az
 
-    X_train, _, y_train, _, _, _, _ = full_pipeline(str(data_path))
+    X_train, _, y_train, _, _, _, feature_names = full_pipeline(str(data_path))
+    group_names, group_idx = feature_group_index(feature_names)
 
     logistic_model = build_bayesian_logistic(
         X_train,
@@ -343,6 +350,27 @@ def run_bayes(data_path: Path, output_dir: Path, args: argparse.Namespace) -> No
     az.summary(idata_probit, var_names=["alpha", "beta"]).to_csv(
         output_dir / "bayes_probit_summary.csv"
     )
+
+    hierarchical_model = build_hierarchical_logistic(
+        X_train,
+        y_train,
+        feature_names=feature_names,
+        group_names=group_names,
+        group_idx=group_idx,
+        model_name="hierarchical_logistic",
+    )
+    idata_hierarchical = sample_model(
+        hierarchical_model,
+        draws=args.hierarchical_draws or args.draws,
+        tune=args.hierarchical_tune or args.tune,
+        chains=args.chains,
+        target_accept=args.target_accept,
+        random_seed=args.random_seed,
+    )
+    idata_hierarchical.to_netcdf(ROOT / "data" / "idata_hierarchical_logistic.nc")
+    az.summary(idata_hierarchical, var_names=["alpha", "beta", "group_scale"]).to_csv(
+        output_dir / "bayes_hierarchical_logistic_summary.csv"
+    )
     print("[bayes] Done. Trace files written to data/*.nc.")
 
 
@@ -360,7 +388,12 @@ def run_evaluate(data_path: Path, output_dir: Path, args: argparse.Namespace) ->
 
     logistic_trace = ROOT / "data" / "idata_logistic.nc"
     probit_trace = ROOT / "data" / "idata_probit.nc"
-    if not logistic_trace.exists() or not probit_trace.exists():
+    hierarchical_trace = ROOT / "data" / "idata_hierarchical_logistic.nc"
+    if (
+        not logistic_trace.exists()
+        or not probit_trace.exists()
+        or not hierarchical_trace.exists()
+    ):
         raise FileNotFoundError(
             "Missing Bayesian trace files. Run `python run_project.py bayes` first."
         )
@@ -370,9 +403,18 @@ def run_evaluate(data_path: Path, output_dir: Path, args: argparse.Namespace) ->
     )
     idata_logistic = az.from_netcdf(logistic_trace)
     idata_probit = az.from_netcdf(probit_trace)
+    idata_hierarchical = az.from_netcdf(hierarchical_trace)
+    group_names, group_idx = feature_group_index(feature_names)
 
     logistic_model = build_bayesian_logistic(X_train, y_train)
     probit_model = build_bayesian_probit(X_train, y_train)
+    hierarchical_model = build_hierarchical_logistic(
+        X_train,
+        y_train,
+        feature_names=feature_names,
+        group_names=group_names,
+        group_idx=group_idx,
+    )
 
     ppc_logistic = posterior_predict(
         logistic_model,
@@ -386,16 +428,36 @@ def run_evaluate(data_path: Path, output_dir: Path, args: argparse.Namespace) ->
         X_test,
         draws=args.prediction_draws,
     )
+    ppc_hierarchical = posterior_predict(
+        hierarchical_model,
+        idata_hierarchical,
+        X_test,
+        draws=args.prediction_draws,
+    )
 
     p_samples_logistic = risk_samples_from_ppc(ppc_logistic)
     p_samples_probit = risk_samples_from_ppc(ppc_probit)
+    p_samples_hierarchical = risk_samples_from_ppc(ppc_hierarchical)
     y_prob_logistic = p_samples_logistic.mean(axis=0)
     y_prob_probit = p_samples_probit.mean(axis=0)
+    y_prob_hierarchical = p_samples_hierarchical.mean(axis=0)
+
+    np.save(output_dir / "posterior_samples_bayesian_logistic.npy", p_samples_logistic)
+    np.save(output_dir / "posterior_samples_bayesian_probit.npy", p_samples_probit)
+    np.save(
+        output_dir / "posterior_samples_hierarchical_logistic.npy",
+        p_samples_hierarchical,
+    )
+    pd.DataFrame({"y_true": y_test}).to_csv(
+        output_dir / "posterior_prediction_targets.csv",
+        index=False,
+    )
 
     models = {
         "Frequentist Logistic": y_prob_freq,
         "Bayesian Logistic": y_prob_logistic,
         "Bayesian Probit": y_prob_probit,
+        "Hierarchical Logistic": y_prob_hierarchical,
     }
     metrics = {
         name: metric_summary(y_test, y_prob, threshold=0.5)
@@ -413,6 +475,7 @@ def run_evaluate(data_path: Path, output_dir: Path, args: argparse.Namespace) ->
 
     hdi_logistic = az.hdi(p_samples_logistic.T, hdi_prob=0.95)
     hdi_probit = az.hdi(p_samples_probit.T, hdi_prob=0.95)
+    hdi_hierarchical = az.hdi(p_samples_hierarchical.T, hdi_prob=0.95)
     risk_examples = pd.DataFrame(
         {
             "y_true": y_test,
@@ -422,6 +485,9 @@ def run_evaluate(data_path: Path, output_dir: Path, args: argparse.Namespace) ->
             "bayes_probit_mean": y_prob_probit,
             "bayes_probit_hdi_low": hdi_probit[:, 0],
             "bayes_probit_hdi_high": hdi_probit[:, 1],
+            "hierarchical_logistic_mean": y_prob_hierarchical,
+            "hierarchical_logistic_hdi_low": hdi_hierarchical[:, 0],
+            "hierarchical_logistic_hdi_high": hdi_hierarchical[:, 1],
         }
     )
     risk_examples.to_csv(output_dir / "posterior_risk_predictions.csv", index=False)
@@ -449,6 +515,14 @@ def run_evaluate(data_path: Path, output_dir: Path, args: argparse.Namespace) ->
 
     or_summary = logistic_odds_ratio_summary(idata_logistic, feature_names)
     or_summary.to_csv(output_dir / "logistic_odds_ratios.csv", index=False)
+    hierarchical_or_summary = logistic_odds_ratio_summary(
+        idata_hierarchical,
+        feature_names,
+    )
+    hierarchical_or_summary.to_csv(
+        output_dir / "hierarchical_logistic_odds_ratios.csv",
+        index=False,
+    )
 
     plot_posterior_coefs(
         idata_logistic,
@@ -458,23 +532,32 @@ def run_evaluate(data_path: Path, output_dir: Path, args: argparse.Namespace) ->
     plt.savefig(output_dir / "bayesian_logistic_forest.png", dpi=180)
     plt.close()
 
+    plot_posterior_coefs(
+        idata_hierarchical,
+        feature_names=feature_names,
+        model_name="Hierarchical Logistic",
+    )
+    plt.savefig(output_dir / "hierarchical_logistic_forest.png", dpi=180)
+    plt.close()
+
     try:
-        az.compare({"logistic": idata_logistic, "probit": idata_probit}, ic="waic").to_csv(
-            output_dir / "waic_comparison.csv"
-        )
-        az.compare({"logistic": idata_logistic, "probit": idata_probit}, ic="loo").to_csv(
-            output_dir / "loo_comparison.csv"
-        )
+        compare_models = {
+            "logistic": idata_logistic,
+            "probit": idata_probit,
+            "hierarchical_logistic": idata_hierarchical,
+        }
+        az.compare(compare_models, ic="waic").to_csv(output_dir / "waic_comparison.csv")
+        az.compare(compare_models, ic="loo").to_csv(output_dir / "loo_comparison.csv")
     except Exception as exc:
         (output_dir / "model_comparison_warning.txt").write_text(
             f"WAIC/LOO comparison failed: {exc}\n",
             encoding="utf-8",
         )
 
-    c_fp, c_fn = 1.0, 5.0
+    c_fp, c_fn = args.c_fp, args.c_fn
     threshold = expected_loss_threshold(c_fp, c_fn)
-    costs = threshold_cost_curve(y_test, y_prob_logistic, c_fp=c_fp, c_fn=c_fn)
-    costs.to_csv(output_dir / "bayesian_logistic_cost_curve.csv", index=False)
+    costs = threshold_cost_curve(y_test, y_prob_hierarchical, c_fp=c_fp, c_fn=c_fn)
+    costs.to_csv(output_dir / "hierarchical_logistic_cost_curve.csv", index=False)
     best_row = costs.loc[costs["cost"].idxmin()].to_dict()
 
     fig, ax = plt.subplots(figsize=(7, 4))
@@ -493,10 +576,10 @@ def run_evaluate(data_path: Path, output_dir: Path, args: argparse.Namespace) ->
     )
     ax.set_xlabel("Decision threshold")
     ax.set_ylabel("Cost")
-    ax.set_title("Bayesian Logistic Decision Cost")
+    ax.set_title("Hierarchical Logistic Decision Cost")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(output_dir / "bayesian_logistic_cost_curve.png", dpi=180)
+    fig.savefig(output_dir / "hierarchical_logistic_cost_curve.png", dpi=180)
     plt.close(fig)
 
     write_json(
@@ -508,12 +591,114 @@ def run_evaluate(data_path: Path, output_dir: Path, args: argparse.Namespace) ->
             "empirical_best_threshold": best_row,
             "metrics_at_bayes_threshold": metric_summary(
                 y_test,
-                y_prob_logistic,
+                y_prob_hierarchical,
                 threshold=threshold,
             ),
         },
     )
     print("[evaluate] Done.")
+
+
+def run_optimize(data_path: Path, output_dir: Path, args: argparse.Namespace) -> None:
+    print("[optimize] Tuning posterior triage policy with Bayesian optimization.")
+    ensure_data(data_path)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    from sklearn.model_selection import train_test_split
+
+    sample_path = output_dir / "posterior_samples_hierarchical_logistic.npy"
+    target_path = output_dir / "posterior_prediction_targets.csv"
+    if not sample_path.exists() or not target_path.exists():
+        raise FileNotFoundError(
+            "Missing posterior samples. Run `python run_project.py evaluate` first."
+        )
+
+    p_samples = np.load(sample_path)
+    y_true = pd.read_csv(target_path)["y_true"].to_numpy(dtype=int)
+    indices = np.arange(len(y_true))
+    validation_idx, final_idx = train_test_split(
+        indices,
+        test_size=args.policy_test_size,
+        random_state=args.random_seed,
+        stratify=y_true,
+    )
+
+    best, history = bayesian_optimize_triage_policy(
+        p_samples[:, validation_idx],
+        y_true[validation_idx],
+        c_fp=args.c_fp,
+        c_fn=args.c_fn,
+        eval_c_ref=args.eval_referral_cost,
+        abstention_penalty=args.abstention_penalty,
+        n_initial=args.bo_initial,
+        n_iter=args.bo_iter,
+        random_state=args.random_seed,
+        n_candidates=args.bo_candidates,
+    )
+    history.to_csv(output_dir / "triage_bayesopt_history.csv", index=False)
+
+    triage = posterior_expected_loss_triage(
+        p_samples[:, final_idx],
+        c_fp=args.c_fp,
+        c_fn=args.c_fn,
+        c_ref=best["decision_referral_cost"],
+        q_low=best["q_low"],
+        q_high=best["q_high"],
+    )
+    triage.insert(0, "test_index", final_idx)
+    triage.insert(1, "y_true", y_true[final_idx])
+    triage.to_csv(output_dir / "optimized_triage_decisions.csv", index=False)
+
+    final_metrics = triage_metrics(
+        y_true[final_idx],
+        triage,
+        c_fp=args.c_fp,
+        c_fn=args.c_fn,
+        c_ref=args.eval_referral_cost,
+    )
+    write_json(
+        output_dir / "triage_bayesopt_best.json",
+        {
+            "optimized_on": "validation split of held-out posterior predictions",
+            "evaluated_on": "final split of held-out posterior predictions",
+            "costs": {
+                "c_fp": args.c_fp,
+                "c_fn": args.c_fn,
+                "eval_referral_cost": args.eval_referral_cost,
+                "abstention_penalty": args.abstention_penalty,
+            },
+            "best_validation_policy": best,
+            "final_split_metrics": final_metrics,
+        },
+    )
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    best_so_far = history["objective"].cummin()
+    ax.plot(history["iteration"], history["objective"], alpha=0.45, label="Trial")
+    ax.plot(history["iteration"], best_so_far, color="tomato", label="Best so far")
+    ax.set_xlabel("Bayesian optimization iteration")
+    ax.set_ylabel("Validation objective")
+    ax.set_title("Triage Policy Bayesian Optimization")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_dir / "triage_bayesopt_history.png", dpi=180)
+    plt.close(fig)
+
+    action_counts = triage["action"].value_counts().reindex(
+        ["low", "high", "refer"],
+        fill_value=0,
+    )
+    fig, ax = plt.subplots(figsize=(6, 4))
+    action_counts.plot(kind="bar", ax=ax, color=["steelblue", "tomato", "gray"])
+    ax.set_xlabel("Triage action")
+    ax.set_ylabel("Patients")
+    ax.set_title("Optimized Triage Decisions")
+    ax.set_xticklabels(action_counts.index, rotation=0)
+    fig.tight_layout()
+    fig.savefig(output_dir / "optimized_triage_action_counts.png", dpi=180)
+    plt.close(fig)
+
+    print("[optimize] Done.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -525,7 +710,15 @@ def parse_args() -> argparse.Namespace:
         "step",
         nargs="?",
         default="all",
-        choices=["all", "eda", "preprocess", "baseline", "bayes", "evaluate"],
+        choices=[
+            "all",
+            "eda",
+            "preprocess",
+            "baseline",
+            "bayes",
+            "evaluate",
+            "optimize",
+        ],
         help="Workflow step to run. Defaults to all.",
     )
     parser.add_argument("--data", default=str(DEFAULT_DATA), help="Path to framingham.csv.")
@@ -537,6 +730,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--random-seed", type=int, default=RANDOM_STATE)
     parser.add_argument("--shrink-draws", type=int, default=2000)
     parser.add_argument("--shrink-tune", type=int, default=1500)
+    parser.add_argument(
+        "--hierarchical-draws",
+        type=int,
+        default=None,
+        help="Posterior draws for hierarchical model; defaults to --draws.",
+    )
+    parser.add_argument(
+        "--hierarchical-tune",
+        type=int,
+        default=None,
+        help="Tuning steps for hierarchical model; defaults to --tune.",
+    )
     parser.add_argument("--no-shrinkage", action="store_true")
     parser.add_argument(
         "--prediction-draws",
@@ -549,6 +754,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="For `all`, run only EDA/preprocess/baseline steps.",
     )
+    parser.add_argument("--c-fp", type=float, default=1.0)
+    parser.add_argument("--c-fn", type=float, default=5.0)
+    parser.add_argument("--eval-referral-cost", type=float, default=0.75)
+    parser.add_argument("--abstention-penalty", type=float, default=0.1)
+    parser.add_argument("--bo-initial", type=int, default=12)
+    parser.add_argument("--bo-iter", type=int, default=30)
+    parser.add_argument("--bo-candidates", type=int, default=2000)
+    parser.add_argument("--policy-test-size", type=float, default=0.5)
     return parser.parse_args()
 
 
@@ -567,6 +780,8 @@ def main() -> None:
         run_bayes(data_path, output_dir, args)
     elif args.step == "evaluate":
         run_evaluate(data_path, output_dir, args)
+    elif args.step == "optimize":
+        run_optimize(data_path, output_dir, args)
     else:
         run_eda(data_path, output_dir)
         run_preprocess(data_path, output_dir)
@@ -576,6 +791,7 @@ def main() -> None:
         else:
             run_bayes(data_path, output_dir, args)
             run_evaluate(data_path, output_dir, args)
+            run_optimize(data_path, output_dir, args)
 
 
 if __name__ == "__main__":

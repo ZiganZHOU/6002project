@@ -114,7 +114,38 @@ z_i \sim \mathcal{N}(\alpha + x_i^T\beta, 1), \quad y_i = I(z_i > 0)
 Probit coefficients are interpreted on the latent-normal scale. They should not
 be exponentiated as odds ratios.
 
-### 4.3 Priors and Sensitivity
+### 4.3 Grouped Hierarchical Shrinkage Logistic Regression
+
+The project adds a structured Bayesian model beyond ordinary logistic/probit
+regression. Predictors are assigned to clinically motivated groups:
+
+| Group | Predictors |
+|---|---|
+| Demographics | `male`, `age`, `education` |
+| Behavior | `currentSmoker`, `cigsPerDay` |
+| Medical history | `BPMeds`, `prevalentStroke`, `prevalentHyp`, `diabetes` |
+| Vitals | `sysBP`, `diaBP`, `BMI`, `heartRate` |
+| Labs | `totChol`, `glucose` |
+
+The hierarchical logistic model is:
+
+\[
+y_i \sim \mathrm{Bernoulli}(p_i), \quad
+\mathrm{logit}(p_i)=\alpha+x_i^T\beta
+\]
+
+\[
+\beta_j \sim \mathcal{N}(0,\tau_{g(j)}^2), \quad
+\tau_g \sim \mathrm{HalfNormal}(1)
+\]
+
+where \(g(j)\) maps predictor \(j\) to its clinical group. This is a
+methodological addition: instead of applying one fixed prior scale to every
+coefficient, the model learns how strongly to shrink each family of clinical
+features. The posterior of \(\tau_g\) can be interpreted as evidence about the
+relative predictive strength and stability of each feature family.
+
+### 4.4 Priors and Sensitivity
 
 The predictors are standardized, so Normal priors on coefficients are
 interpretable on a common scale. The baseline prior
@@ -141,7 +172,8 @@ model misses most positive cases at the default 0.5 threshold.
 
 ## 6. Bayesian Evaluation Plan
 
-The `evaluate` step compares the Bayesian logistic and probit models using:
+The `evaluate` step compares Bayesian logistic, Bayesian probit, and grouped
+hierarchical Bayesian logistic models using:
 
 - MCMC diagnostics: divergences, \(\hat{R}\), bulk ESS, and tail ESS.
 - Posterior predictive mean risk for each test patient.
@@ -149,13 +181,14 @@ The `evaluate` step compares the Bayesian logistic and probit models using:
 - ROC-AUC, PR-AUC, Brier score, and calibration curves.
 - WAIC and PSIS-LOO for approximate out-of-sample model comparison.
 - Logistic-model odds-ratio posterior summaries.
+- Group-scale posterior summaries for the hierarchical model.
 
 The posterior predictive code explicitly samples the deterministic risk
 variable `p`, not the binary observed node `y_obs`. This is essential: sampling
 only the binary outcome would collapse predictions into 0/1 draws and would not
 provide continuous risk intervals.
 
-## 7. Bayesian Decision Analysis
+## 7. Bayesian Decision and Optimization Algorithms
 
 Clinical screening often treats false negatives as more costly than false
 positives. Let:
@@ -181,6 +214,79 @@ increases sensitivity from 0.054 to 0.574, while specificity decreases from
 0.986 to 0.726. This is the kind of trade-off Bayesian posterior risks make
 explicit.
 
+### 7.1 Posterior Expected-Loss Triage With Reject Option
+
+The algorithmic contribution is a three-action triage rule. For each patient,
+the Bayesian model produces posterior risk samples:
+
+\[
+p_i^{(1)}, p_i^{(2)}, \ldots, p_i^{(S)}
+\]
+
+The available actions are:
+
+- \(a=0\): low risk / no intervention.
+- \(a=1\): high risk / intervention or follow-up.
+- \(a=r\): refer for further testing.
+
+The posterior expected losses are:
+
+\[
+L_i(a=0)=C_{FN}\mathbb{E}[p_i\mid D]
+\]
+
+\[
+L_i(a=1)=C_{FP}\mathbb{E}[1-p_i\mid D]
+\]
+
+\[
+L_i(a=r)=C_{REF}
+\]
+
+The rule first chooses the action with the smallest posterior expected loss.
+It then checks posterior confidence around the cost-based threshold \(p^*\):
+
+\[
+\Pr(p_i>p^*\mid D) \ge q_{high} \Rightarrow \text{high risk}
+\]
+
+\[
+\Pr(p_i>p^*\mid D) \le q_{low} \Rightarrow \text{low risk}
+\]
+
+If neither condition is met, the patient is assigned to `refer`. This creates a
+clinically realistic reject option: the model can explicitly say that more
+testing is preferable to an overconfident binary label.
+
+### 7.2 Bayesian Optimization for Triage Policy Tuning
+
+The project also adds Bayesian optimization, but it is used where it is
+computationally appropriate: it tunes the decision policy after MCMC has already
+produced posterior risk samples. It does not rerun PyMC at each optimization
+step.
+
+The tuned policy parameters are:
+
+| Parameter | Meaning |
+|---|---|
+| \(q_{low}\) | posterior confidence cutoff for low-risk assignment |
+| \(q_{high}\) | posterior confidence cutoff for high-risk assignment |
+| \(C_{REF}^{decision}\) | internal referral cost used by the triage rule |
+
+The validation objective is:
+
+\[
+\text{objective} =
+\text{average clinical cost}
+\;+\;
+\lambda \cdot \text{referral rate}
+\]
+
+A Gaussian-process surrogate model is fit to evaluated policy settings, and a
+lower-confidence-bound acquisition rule proposes the next policy to test. This
+turns the final clinical decision rule into a tunable Bayesian decision policy
+rather than a hand-picked threshold.
+
 ## 8. Limitations
 
 - The dataset is observational and should not be interpreted causally.
@@ -188,15 +294,19 @@ explicit.
 - The current imputation is a single imputed dataset; full multiple imputation
   would better propagate missing-data uncertainty.
 - Logistic/probit models assume linear effects in the standardized predictors.
+- The Bayesian optimization step tunes the triage policy, not the MCMC model
+  itself; this avoids repeated expensive posterior sampling but means prior
+  hyperparameters are not optimized by BO.
 - The project is educational and is not suitable for clinical deployment.
 
 ## 9. Conclusion
 
 The project implements a complete Bayesian binary-classification workflow for
 cardiovascular risk prediction: leakage-safe preprocessing, Bayesian logit and
-probit models, posterior predictive uncertainty, model comparison, and
-cost-sensitive decision analysis. This matches the Bayesian machine learning
-project theme while keeping the clinical interpretation careful and transparent.
+probit models, grouped hierarchical shrinkage, posterior predictive
+uncertainty, model comparison, Bayesian optimization of triage policy, and
+expected-loss decision rules with a reject option. This matches the Bayesian
+machine learning project theme while adding clear method-level contributions.
 
 ## References
 

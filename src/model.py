@@ -102,6 +102,63 @@ def build_bayesian_probit(
     return model
 
 
+def build_hierarchical_logistic(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    feature_names: list[str],
+    group_names: list[str],
+    group_idx: np.ndarray,
+    model_name: str = "hierarchical_logistic",
+    group_scale_prior: float = 1.0,
+):
+    """
+    Bayesian logistic regression with grouped hierarchical shrinkage.
+
+    Coefficients share a learned scale within clinically motivated feature
+    groups, e.g. demographics, behavior, medical history, vitals, and labs:
+
+        beta_j ~ Normal(0, tau_group[j])
+        tau_g ~ HalfNormal(group_scale_prior)
+
+    This lets the model learn which clinical feature families need stronger or
+    weaker shrinkage instead of applying one fixed coefficient prior to every
+    predictor.
+    """
+    pm = _require_pymc()
+    n_features = X_train.shape[1]
+    if len(feature_names) != n_features:
+        raise ValueError("feature_names length must match X_train columns.")
+    if len(group_idx) != n_features:
+        raise ValueError("group_idx length must match X_train columns.")
+
+    coords = {
+        "feature": feature_names,
+        "group": group_names,
+    }
+    group_idx = np.asarray(group_idx, dtype="int64")
+
+    with pm.Model(coords=coords) as model:
+        X = pm.Data("X", X_train)
+        alpha = pm.Normal("alpha", mu=0, sigma=1)
+        group_scale = pm.HalfNormal(
+            "group_scale",
+            sigma=group_scale_prior,
+            dims="group",
+        )
+        beta = pm.Normal(
+            "beta",
+            mu=0,
+            sigma=group_scale[group_idx],
+            dims="feature",
+        )
+
+        eta = alpha + pm.math.dot(X, beta)
+        p = pm.Deterministic("p", pm.math.sigmoid(eta))
+        y_obs = pm.Bernoulli("y_obs", p=p, observed=y_train)
+
+    return model
+
+
 def sample_model(
     model,
     draws: int = 3000,
@@ -137,7 +194,7 @@ def posterior_predict(model, idata, X_new: np.ndarray, draws: int | None = None)
     pm = _require_pymc()
     idata_for_prediction = idata
     if draws is not None:
-        idata_for_prediction = idata.sel(draw=slice(0, draws - 1))
+        idata_for_prediction = idata.isel(draw=slice(0, draws))
 
     with model:
         pm.set_data({"X": X_new})

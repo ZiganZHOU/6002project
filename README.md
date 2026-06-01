@@ -21,6 +21,23 @@ This repository directly addresses the project prompt:
   coefficient uncertainty, WAIC/PSIS-LOO comparison, and cost-sensitive
   decision thresholds.
 
+## Methodological Contributions
+
+The project now includes three method-level extensions beyond a direct
+application of Bayesian logistic/probit regression:
+
+1. **Grouped hierarchical shrinkage prior**: predictors are grouped by clinical
+   meaning (demographics, behavior, medical history, vitals, labs), and each
+   group receives a learned shrinkage scale. This lets the model infer which
+   clinical feature families need stronger or weaker regularization.
+2. **Posterior expected-loss triage with reject option**: the final decision is
+   not forced into low/high risk. The model can output `refer` when posterior
+   risk is too uncertain or expected loss favors additional testing.
+3. **Bayesian optimization for triage policy tuning**: a Gaussian-process
+   surrogate with a lower-confidence-bound acquisition function tunes the
+   triage parameters `q_low`, `q_high`, and internal referral cost using saved
+   posterior risk samples, without rerunning MCMC.
+
 ## Dataset
 
 **Framingham Heart Study Dataset**  
@@ -57,7 +74,7 @@ The project no longer depends on notebooks. Use the root runner for both full
 and stepwise execution.
 
 ```powershell
-# Full project: EDA, preprocessing, baseline, Bayesian sampling, evaluation
+# Full project: EDA, preprocessing, baseline, sampling, evaluation, optimization
 python run_project.py all
 
 # Quick non-Bayesian check when PyMC is not installed yet
@@ -69,6 +86,7 @@ python run_project.py preprocess
 python run_project.py baseline
 python run_project.py bayes
 python run_project.py evaluate
+python run_project.py optimize
 ```
 
 For a short smoke test of the Bayesian code, reduce the sampler settings:
@@ -80,8 +98,9 @@ python run_project.py evaluate --prediction-draws 500
 
 The `bayes` step is the long-running MCMC step. It writes
 `data/idata_logistic.nc`, `data/idata_logistic_shrink.nc`, and
-`data/idata_probit.nc`; those files are ignored because they can be large.
-Plots, metrics, and tables are written to `outputs/`.
+`data/idata_probit.nc`, and `data/idata_hierarchical_logistic.nc`; those files
+are ignored because they can be large. Plots, metrics, posterior risk samples,
+Bayesian-optimization history, and triage decisions are written to `outputs/`.
 
 ## Methodology
 
@@ -105,6 +124,8 @@ Plots, metrics, and tables are written to `outputs/`.
    - Bayesian probit regression with the same design matrix and comparable
      priors.
    - Shrinkage prior sensitivity for the logistic model.
+   - Grouped hierarchical Bayesian logistic regression with learned
+     group-specific shrinkage scales.
 
 4. **Evaluation**
    - ROC-AUC, PR-AUC, Brier score, calibration curves.
@@ -114,6 +135,9 @@ Plots, metrics, and tables are written to `outputs/`.
    - Posterior predictive risk intervals for individual patients.
    - Asymmetric clinical loss with threshold
      `C_FP / (C_FP + C_FN)`.
+   - Three-action posterior triage: `low`, `high`, and `refer`.
+   - Bayesian optimization of triage-policy parameters on held-out posterior
+     risk samples.
 
 ## Baseline Sanity Check
 
