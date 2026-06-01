@@ -120,19 +120,21 @@ def logistic_odds_ratio_summary(
     import pandas as pd
     import arviz as az
 
-    beta = idata.posterior["beta"].values  # (chain, draw, k)
-    beta = beta.reshape(-1, beta.shape[-1])  # (samples, k)
-    or_samples = np.exp(beta)  # (samples, k)
+    beta = idata.posterior["beta"]
+    feature_dim = beta.dims[-1]
+    if len(feature_names) != beta.sizes[feature_dim]:
+        raise ValueError("feature_names length must match posterior beta features.")
 
-    hdi = az.hdi(or_samples, hdi_prob=hdi_prob)  # (k, 2)
-    med = np.median(or_samples, axis=0)
+    or_samples = np.exp(beta)
+    hdi = az.hdi(or_samples, hdi_prob=hdi_prob)["beta"]
+    med = or_samples.median(dim=("chain", "draw"))
 
     out = pd.DataFrame(
         {
             "feature": feature_names,
-            "or_median": med,
-            f"or_hdi_{int(hdi_prob*100)}_low": hdi[:, 0],
-            f"or_hdi_{int(hdi_prob*100)}_high": hdi[:, 1],
+            "or_median": med.values,
+            f"or_hdi_{int(hdi_prob*100)}_low": hdi.sel(hdi="lower").values,
+            f"or_hdi_{int(hdi_prob*100)}_high": hdi.sel(hdi="higher").values,
         }
     )
     out["abs_log_or_median"] = np.abs(np.log(out["or_median"]))

@@ -379,6 +379,21 @@ def risk_samples_from_ppc(ppc) -> np.ndarray:
     return samples.reshape(-1, samples.shape[-1])
 
 
+def hdi_over_posterior_samples(samples: np.ndarray, hdi_prob: float = 0.95) -> np.ndarray:
+    """Return one HDI interval per column for arrays shaped samples x items."""
+    import arviz as az
+
+    samples = np.asarray(samples)
+    if samples.ndim != 2:
+        raise ValueError("samples must have shape (posterior_samples, n_items).")
+    return np.vstack(
+        [
+            az.hdi(samples[:, item_idx], hdi_prob=hdi_prob)
+            for item_idx in range(samples.shape[1])
+        ]
+    )
+
+
 def run_evaluate(data_path: Path, output_dir: Path, args: argparse.Namespace) -> None:
     print("[evaluate] Evaluating Bayesian models and writing comparison outputs.")
     ensure_data(data_path)
@@ -473,9 +488,12 @@ def run_evaluate(data_path: Path, output_dir: Path, args: argparse.Namespace) ->
     fig.savefig(output_dir / "model_comparison_curves.png", dpi=180)
     plt.close(fig)
 
-    hdi_logistic = az.hdi(p_samples_logistic.T, hdi_prob=0.95)
-    hdi_probit = az.hdi(p_samples_probit.T, hdi_prob=0.95)
-    hdi_hierarchical = az.hdi(p_samples_hierarchical.T, hdi_prob=0.95)
+    hdi_logistic = hdi_over_posterior_samples(p_samples_logistic, hdi_prob=0.95)
+    hdi_probit = hdi_over_posterior_samples(p_samples_probit, hdi_prob=0.95)
+    hdi_hierarchical = hdi_over_posterior_samples(
+        p_samples_hierarchical,
+        hdi_prob=0.95,
+    )
     risk_examples = pd.DataFrame(
         {
             "y_true": y_test,
