@@ -141,20 +141,24 @@ Bayesian-optimization history, and triage decisions are written to `outputs/`.
 
 ## Baseline Sanity Check
 
-Using the deterministic preprocessing pipeline and a frequentist logistic
-baseline on the held-out 20% test set:
+The baseline results are intentionally not hard-coded in the README. Run:
 
-| Metric | Value |
-|---|---:|
-| ROC-AUC | 0.701 |
-| PR-AUC | 0.294 |
-| Brier score | 0.122 |
-| Accuracy at 0.5 | 0.844 |
-| Confusion matrix at 0.5 | TN=709, FP=10, FN=122, TP=7 |
+```powershell
+python run_project.py baseline
+```
 
-The high accuracy is mostly a class-imbalance artifact. For clinical screening,
-the evaluation step therefore emphasizes PR-AUC, calibration, posterior
-uncertainty, and cost-sensitive thresholds rather than accuracy alone.
+This writes the reproducible baseline metrics and decision-cost outputs to:
+
+```text
+outputs/baseline_metrics.json
+outputs/baseline_predictions.csv
+outputs/baseline_cost_curve.csv
+outputs/baseline_cost_curve.png
+```
+
+Because the target is imbalanced, the project treats accuracy as secondary.
+The main workflow emphasizes PR-AUC, calibration, posterior uncertainty, and
+cost-sensitive triage rather than a default 0.5 classification threshold.
 
 ## Project Structure
 

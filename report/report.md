@@ -155,20 +155,21 @@ whether correlated clinical variables create unstable posteriors.
 
 ## 5. Baseline Sanity Check
 
-A frequentist logistic regression baseline was run after the corrected
-preprocessing pipeline. This baseline is not the final Bayesian model; it is a
-sanity check for the split, preprocessing, and metric code.
+A frequentist logistic regression baseline is included as a reproducible sanity
+check for the split, preprocessing, and metric code. The report does not
+hard-code baseline values before the workflow is run. Execute:
 
-| Test-set metric | Value |
-|---|---:|
-| ROC-AUC | 0.701 |
-| PR-AUC | 0.294 |
-| Brier score | 0.122 |
-| Accuracy at threshold 0.5 | 0.844 |
-| Confusion matrix at 0.5 | TN=709, FP=10, FN=122, TP=7 |
+```powershell
+python run_project.py baseline
+```
 
-The confusion matrix shows why accuracy is a poor primary metric here: the
-model misses most positive cases at the default 0.5 threshold.
+The script writes baseline outputs to `outputs/baseline_metrics.json`,
+`outputs/baseline_predictions.csv`, and `outputs/baseline_cost_curve.png`.
+
+The purpose of this step is to confirm that the deterministic preprocessing
+pipeline works before running the Bayesian models. Because the target is
+imbalanced, accuracy should be interpreted cautiously and PR-AUC, Brier score,
+calibration, and decision cost should receive more attention.
 
 ## 6. Bayesian Evaluation Plan
 
@@ -208,11 +209,11 @@ This yields the Bayes-optimal threshold:
 p^* = \frac{C_{FP}}{C_{FP}+C_{FN}}
 \]
 
-For example, if \(C_{FN}=5C_{FP}\), then \(p^*=1/6 \approx 0.167\). On the
-frequentist baseline, moving from threshold 0.5 to this cost-based threshold
-increases sensitivity from 0.054 to 0.574, while specificity decreases from
-0.986 to 0.726. This is the kind of trade-off Bayesian posterior risks make
-explicit.
+For example, if \(C_{FN}=5C_{FP}\), then \(p^*=1/6 \approx 0.167\). The
+baseline and Bayesian evaluation scripts report the resulting sensitivity,
+specificity, and observed test-set cost after the workflow is run. This makes
+the threshold trade-off reproducible instead of embedding precomputed values in
+the report.
 
 ### 7.1 Posterior Expected-Loss Triage With Reject Option
 
