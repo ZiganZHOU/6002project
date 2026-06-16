@@ -302,7 +302,141 @@ the statistical model estimates patient risk, while the optimization layer
 calibrates how that risk should be converted into an actionable triage
 recommendation.
 
-## 8. Limitations
+## 8. Results
+
+The full workflow was run successfully on 2 June 2026. The generated artifacts
+are stored in `outputs/`, including metric tables, posterior summaries,
+comparison plots, posterior risk samples, and optimized triage decisions.
+
+### 8.1 Predictive Performance
+
+At the default 0.5 classification threshold, the four fitted models produced
+the following held-out test performance:
+
+| Model | ROC-AUC | PR-AUC | Brier | Accuracy | Sensitivity | Specificity | Precision |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Frequentist Logistic | 0.701 | 0.294 | 0.122 | 84.43% | 5.43% | 98.61% | 41.18% |
+| Bayesian Logistic | 0.701 | 0.294 | 0.122 | 84.43% | 5.43% | 98.61% | 41.18% |
+| Bayesian Probit | 0.673 | 0.267 | 0.133 | 82.43% | 10.08% | 95.41% | 28.26% |
+| Hierarchical Logistic | 0.700 | 0.296 | 0.121 | 84.79% | 4.65% | 99.17% | 50.00% |
+
+The highest raw accuracy is achieved by the grouped hierarchical logistic model
+at **84.79%**. However, accuracy is not the main success measure in this
+imbalanced screening problem: the positive class is only about 15.2% of the
+dataset, so a high threshold can produce high accuracy while missing many CHD
+cases. This is visible in the low sensitivity values at the default 0.5
+threshold.
+
+The more clinically relevant interpretation is that the Bayesian logistic and
+hierarchical logistic models have similar discrimination, with ROC-AUC around
+0.70 and PR-AUC around 0.29. The hierarchical model has the best Brier score
+among the fitted Bayesian models, suggesting slightly better probability
+calibration.
+
+### 8.2 Bayesian Model Comparison
+
+Approximate out-of-sample model comparison using WAIC and PSIS-LOO ranks the
+hierarchical logistic model first:
+
+| Model | WAIC Rank | elpd WAIC | LOO Rank | elpd LOO |
+|---|---:|---:|---:|---:|
+| Hierarchical Logistic | 1 | -1286.16 | 1 | -1286.17 |
+| Bayesian Logistic | 2 | -1286.96 | 2 | -1286.98 |
+| Bayesian Probit | 3 | -7327.39 | 3 | -3982.31 |
+
+The hierarchical logistic and ordinary Bayesian logistic models are extremely
+close by WAIC/LOO: the elpd difference is only about 0.81. This means the
+hierarchical model is preferred, but the evidence over the simpler logistic
+model is modest. The probit model has WAIC/LOO warnings and much worse elpd,
+so it should not be the primary reported model.
+
+### 8.3 Posterior Effects
+
+For the hierarchical logistic model, all reported coefficients have
+\(\hat{R}=1.00\), indicating good MCMC convergence by this diagnostic. The
+largest posterior odds-ratio medians are:
+
+| Feature | Median OR | 95% HDI |
+|---|---:|---:|
+| `age` | 1.79 | [1.60, 2.02] |
+| `sysBP` | 1.30 | [1.09, 1.53] |
+| `cigsPerDay` | 1.27 | [1.08, 1.47] |
+| `male` | 1.24 | [1.11, 1.38] |
+| `glucose` | 1.19 | [1.07, 1.33] |
+
+Because predictors are standardized, these odds ratios are interpreted per
+one-standard-deviation increase for continuous predictors. The strongest and
+most stable risk signals are age, systolic blood pressure, cigarettes per day,
+male sex, and glucose.
+
+The learned group-scale posteriors also support this interpretation. The
+demographic group has the largest posterior mean scale (0.545), followed by
+behavioral predictors (0.398), laboratory measurements (0.347), vitals (0.220),
+and medical history indicators (0.106). This suggests that the model found the
+strongest regularized signal in demographic and behavioral variables.
+
+### 8.4 Cost-Sensitive Decision Analysis
+
+Using the asymmetric cost setting \(C_{FP}=1\) and \(C_{FN}=5\), the
+Bayes-optimal probability threshold is:
+
+\[
+p^*=\frac{1}{1+5}=0.167
+\]
+
+At this cost-based threshold, the hierarchical logistic model reaches:
+
+| Metric | Value |
+|---|---:|
+| Accuracy | 69.81% |
+| Sensitivity | 58.91% |
+| Specificity | 71.77% |
+| Precision | 27.24% |
+| False positives | 203 |
+| False negatives | 53 |
+| Total observed cost | 468 |
+
+This threshold lowers overall accuracy, but it substantially increases
+sensitivity compared with the default 0.5 threshold. That trade-off is
+appropriate when missing a future CHD case is assumed to be more costly than
+unnecessary follow-up.
+
+### 8.5 Optimized Three-Action Triage
+
+The Bayesian optimization step tuned the posterior triage policy on a
+validation split and evaluated it on a final held-out split of posterior
+predictions. The selected validation policy used:
+
+| Parameter | Value |
+|---|---:|
+| \(q_{low}\) | 0.010 |
+| \(q_{high}\) | 0.986 |
+| Internal referral cost | 1.313 |
+
+On the final split, the optimized triage policy produced:
+
+| Quantity | Value |
+|---|---:|
+| Final patients | 424 |
+| Low-risk decisions | 224 |
+| High-risk decisions | 89 |
+| Refer decisions | 111 |
+| Coverage | 73.82% |
+| Referral rate | 26.18% |
+| Average cost | 0.538 |
+| Decided-case accuracy | 74.12% |
+| Decided true negatives | 208 |
+| Decided false positives | 65 |
+| Decided false negatives | 16 |
+| Decided true positives | 24 |
+
+The substantive result is that the Bayesian model is most useful when treated
+as a probabilistic triage system rather than a hard classifier. It can classify
+about 74% of cases directly and refer about 26% for additional testing, while
+using posterior uncertainty and asymmetric clinical costs to avoid forcing
+uncertain cases into overconfident labels.
+
+## 9. Limitations
 
 - The dataset is observational and should not be interpreted causally.
 - The target is long-horizon CHD risk, not an immediate clinical diagnosis.
@@ -314,7 +448,7 @@ recommendation.
   prior hyperparameters are not optimized by BO.
 - The project is educational and is not suitable for clinical deployment.
 
-## 9. Conclusion
+## 10. Conclusion
 
 The project implements a complete Bayesian binary-classification workflow for
 cardiovascular risk prediction: leakage-safe preprocessing, Bayesian logit and
@@ -323,6 +457,15 @@ uncertainty, model comparison, Bayesian optimization of triage-policy
 calibration, and expected-loss decision rules with a reject option. This
 matches the Bayesian machine learning project theme while adding clear
 method-level contributions.
+
+The empirical result is that the grouped hierarchical Bayesian logistic model
+is the best overall model, although it only modestly improves on ordinary
+Bayesian logistic regression. Its raw accuracy is **84.79%**, but the more
+important finding is the decision-analysis result: lowering the decision
+threshold according to asymmetric clinical costs raises sensitivity to
+**58.91%**, and the optimized three-action triage policy directly classifies
+about **73.82%** of held-out patients while referring **26.18%** for further
+testing.
 
 ## References
 

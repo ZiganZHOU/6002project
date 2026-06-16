@@ -306,6 +306,7 @@ def run_bayes(data_path: Path, output_dir: Path, args: argparse.Namespace) -> No
         chains=args.chains,
         target_accept=args.target_accept,
         random_seed=args.random_seed,
+        model_label="Bayesian Logistic",
     )
     idata_logistic.to_netcdf(ROOT / "data" / "idata_logistic.nc")
     az.summary(idata_logistic, var_names=["alpha", "beta"]).to_csv(
@@ -327,6 +328,7 @@ def run_bayes(data_path: Path, output_dir: Path, args: argparse.Namespace) -> No
             chains=args.chains,
             target_accept=args.target_accept,
             random_seed=args.random_seed,
+            model_label="Bayesian Logistic Shrinkage",
         )
         idata_shrink.to_netcdf(ROOT / "data" / "idata_logistic_shrink.nc")
         az.summary(idata_shrink, var_names=["alpha", "beta"]).to_csv(
@@ -336,6 +338,7 @@ def run_bayes(data_path: Path, output_dir: Path, args: argparse.Namespace) -> No
     probit_model = build_bayesian_probit(
         X_train,
         y_train,
+        beta_scale=args.probit_beta_scale,
         model_name="bayes_probit",
     )
     idata_probit = sample_model(
@@ -343,8 +346,11 @@ def run_bayes(data_path: Path, output_dir: Path, args: argparse.Namespace) -> No
         draws=args.draws,
         tune=args.tune,
         chains=args.chains,
+        init="adapt_diag",
+        initvals={"alpha": 0.0, "beta": np.zeros(X_train.shape[1])},
         target_accept=args.target_accept,
         random_seed=args.random_seed,
+        model_label="Bayesian Probit",
     )
     idata_probit.to_netcdf(ROOT / "data" / "idata_probit.nc")
     az.summary(idata_probit, var_names=["alpha", "beta"]).to_csv(
@@ -366,6 +372,7 @@ def run_bayes(data_path: Path, output_dir: Path, args: argparse.Namespace) -> No
         chains=args.chains,
         target_accept=args.target_accept,
         random_seed=args.random_seed,
+        model_label="Hierarchical Logistic",
     )
     idata_hierarchical.to_netcdf(ROOT / "data" / "idata_hierarchical_logistic.nc")
     az.summary(idata_hierarchical, var_names=["alpha", "beta", "group_scale"]).to_csv(
@@ -762,6 +769,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chains", type=int, default=4, help="Number of MCMC chains.")
     parser.add_argument("--target-accept", type=float, default=0.95)
     parser.add_argument("--random-seed", type=int, default=RANDOM_STATE)
+    parser.add_argument(
+        "--probit-beta-scale",
+        type=float,
+        default=1.5,
+        help="Coefficient prior scale for probit on the latent-normal scale.",
+    )
     parser.add_argument("--shrink-draws", type=int, default=2000)
     parser.add_argument("--shrink-tune", type=int, default=1500)
     parser.add_argument(

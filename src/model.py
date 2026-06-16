@@ -2,6 +2,8 @@
 Bayesian logistic and probit regression models using PyMC.
 """
 
+import warnings
+
 import numpy as np
 
 
@@ -73,7 +75,7 @@ def build_bayesian_probit(
     y_train: np.ndarray,
     model_name: str = "bayes_probit",
     prior_family: str = "normal",
-    beta_scale: float = 2.5,
+    beta_scale: float = 1.5,
 ):
     """
     Bayesian probit regression: uses the normal CDF (Phi) as the link function.
@@ -95,8 +97,8 @@ def build_bayesian_probit(
 
         eta = alpha + pm.math.dot(X, beta)
 
-        # Probit link: Phi(eta)
-        p = pm.Deterministic("p", 0.5 * (1 + pm.math.erf(eta / pm.math.sqrt(2))))
+        # Probit link: Phi(eta), using PyMC's canonical inverse-probit helper.
+        p = pm.Deterministic("p", pm.math.invprobit(eta))
         y_obs = pm.Bernoulli("y_obs", p=p, observed=y_train)
 
     return model
@@ -166,6 +168,9 @@ def sample_model(
     chains: int = 4,
     target_accept: float = 0.95,
     random_seed: int = 42,
+    init: str = "jitter+adapt_diag",
+    initvals: dict[str, object] | None = None,
+    model_label: str = "model",
 ):
     """Run NUTS sampling and return InferenceData with log-likelihood."""
     pm = _require_pymc()
@@ -174,13 +179,54 @@ def sample_model(
             draws=draws,
             tune=tune,
             chains=chains,
+            init=init,
+            initvals=initvals,
             target_accept=target_accept,
             random_seed=random_seed,
             return_inferencedata=True,
             progressbar=True,
         )
+        _check_sampler_health(idata, model_label=model_label)
         idata = pm.compute_log_likelihood(idata)
     return idata
+
+
+def _check_sampler_health(idata, model_label: str) -> None:
+    """Fail fast when a chain is clearly unusable."""
+    if not hasattr(idata, "sample_stats"):
+        return
+
+    sample_stats = idata.sample_stats
+    n_draws = sample_stats.sizes.get("draw", 0)
+
+    if "diverging" in sample_stats:
+        divergences = sample_stats["diverging"].sum(dim="draw").values
+        bad_chains = np.flatnonzero(divergences >= n_draws)
+        if len(bad_chains):
+            bad = ", ".join(str(int(chain)) for chain in bad_chains)
+            raise RuntimeError(
+                f"{model_label}: NUTS chain(s) {bad} diverged on every draw. "
+                "The trace is not usable; rerun with safer initialization, "
+                "stronger priors, or a higher target_accept."
+            )
+
+        total_divergences = int(np.asarray(divergences).sum())
+        if total_divergences:
+            warnings.warn(
+                f"{model_label}: {total_divergences} post-tuning divergences. "
+                "Inspect posterior diagnostics before using this trace.",
+                RuntimeWarning,
+            )
+
+    if "acceptance_rate" in sample_stats:
+        acceptance = sample_stats["acceptance_rate"].mean(dim="draw").values
+        bad_chains = np.flatnonzero(acceptance < 0.05)
+        if len(bad_chains):
+            bad = ", ".join(str(int(chain)) for chain in bad_chains)
+            raise RuntimeError(
+                f"{model_label}: NUTS chain(s) {bad} have near-zero acceptance "
+                "rate. The trace is not usable."
+            )
 
 
 def posterior_predict(model, idata, X_new: np.ndarray, draws: int | None = None):
