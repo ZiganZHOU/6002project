@@ -1,22 +1,28 @@
-# Report: Bayesian Machine Learning for Cardiovascular Disease Diagnosis
+# Report: Generalizable Bayesian Optimization for Medical Risk Triage
 
 ## 1. Project Aim
 
-This project applies Bayesian machine learning to automated disease diagnosis.
-The concrete task is binary prediction of 10-year coronary heart disease (CHD)
-using the Framingham Heart Study dataset. The modeling focus is Bayesian
-logistic and Bayesian probit regression, which aligns with the project prompt's
-suggested use of Bayesian probit/logistic models for disease presence or absence
-prediction.
+This project studies uncertainty-aware medical risk prediction and decision
+calibration. The original task was cardiovascular disease diagnosis using the
+Framingham Heart Study dataset. The revised project keeps that task as the main
+Bayesian case study, but reframes the contribution as a more general framework:
 
-The main reason to use Bayesian models here is not only classification accuracy.
-Clinical screening requires calibrated probabilities, uncertainty intervals, and
-transparent decisions under asymmetric error costs.
+1. estimate patient-level risk with a probabilistic model;
+2. represent uncertainty using posterior or bootstrap risk samples;
+3. convert risk into `low`, `high`, or `refer` actions through an expected-loss
+   triage policy;
+4. calibrate that triage policy with Bayesian optimization;
+5. evaluate whether the same decision layer transfers across multiple binary
+   medical datasets.
+
+The core claim is therefore not that one cardiovascular model solves every
+medical diagnosis problem. The claim is that the Bayesian optimization layer can
+serve as a reusable decision-calibration mechanism once a task produces risk
+probabilities and uncertainty samples.
 
 ## 2. Data
 
-The local development dataset contains 4,240 patients, 15 predictors, and the
-binary target `TenYearCHD`.
+The main Bayesian case study uses the Framingham Heart Study dataset:
 
 | Quantity | Value |
 |---|---:|
@@ -27,291 +33,214 @@ binary target `TenYearCHD`.
 | Positive rate | 15.2% |
 | Largest missingness | `glucose`, 388 missing values |
 
-The class imbalance is substantial. Accuracy is therefore reported only as a
-secondary metric; PR-AUC, Brier score, calibration, and decision-cost analysis
-are more informative.
+The generalization and ablation experiments use additional binary medical
+datasets:
+
+| Dataset | Task | Role |
+|---|---|---|
+| Breast Cancer Wisconsin Diagnostic | malignant vs benign tumor | cross-disease generalization |
+| Mammographic Mass | malignant vs benign mammographic mass | triage-style generalization |
+| UCI Cleveland Heart Disease | heart disease present vs absent | same-domain generalization |
+| CDC Diabetes Health Indicators | diabetes/prediabetes vs healthy | large-data robustness |
+
+The original UCI/Kaggle files are preserved under `data/raw_external/`. Processed
+CSV files add explicit column names and a unified binary `target` column so that
+the same pipeline can process all auxiliary datasets.
 
 ## 3. Preprocessing
 
-The preprocessing pipeline is deliberately leakage-safe:
+All experiments use leakage-safe preprocessing:
 
-1. Split the raw dataset into train/test sets with stratification.
-2. Fit `IterativeImputer` on training predictors only.
-3. Transform both training and test predictors with that fitted imputer.
-4. Restore simple domain constraints after imputation: binary variables are
-   rounded/clipped to 0/1, education is clipped to its ordinal range, and
-   physiologic variables are clipped to nonnegative values.
-5. Fit `StandardScaler` on the imputed training set only and transform both
-   splits.
+1. Split raw data before fitting imputers or scalers.
+2. Fit the imputer on the training set only.
+3. Transform validation/test sets using the fitted imputer.
+4. Fit the scaler on the training set only.
+5. Transform validation/test sets using the fitted scaler.
 
-The imputer is best described as **MICE-like single imputation**, not a full
-multiple-imputation analysis. This wording matters: a full multiple-imputation
-workflow would fit the model across several independently imputed datasets and
-combine posterior uncertainty across imputations.
+For Framingham, the project also restores simple clinical constraints after
+imputation: binary variables are clipped to 0/1, education is clipped to its
+ordinal range, and physiologic values are clipped to nonnegative values.
 
-VIF is computed on train-only imputed and standardized predictors with an
-intercept. This avoids the misleading inflation that occurs when VIF is computed
-on raw uncentered clinical measurements.
+The imputation is best described as MICE-like single imputation. It is not a
+full multiple-imputation Bayesian analysis.
 
-Top VIF values after this correction:
+## 4. Main Bayesian Models
 
-| Feature | VIF |
-|---|---:|
-| `sysBP` | 3.80 |
-| `diaBP` | 3.00 |
-| `cigsPerDay` | 2.73 |
-| `currentSmoker` | 2.59 |
-| `prevalentHyp` | 2.06 |
+For the Framingham case study, the project fits:
 
-These values suggest moderate, not catastrophic, collinearity. The strongest
-expected overlap is between systolic and diastolic blood pressure, which is why
-the Bayesian models include prior sensitivity checks.
+1. frequentist logistic regression as a sanity-check baseline;
+2. Bayesian logistic regression;
+3. Bayesian probit regression;
+4. grouped hierarchical Bayesian logistic regression.
 
-## 4. Bayesian Models
-
-For patient \(i\), let \(y_i \in \{0,1\}\) denote whether a CHD event occurs
-within 10 years and let \(x_i\) be the standardized predictor vector.
-
-### 4.1 Bayesian Logistic Regression
+The Bayesian logistic model is:
 
 \[
-y_i \sim \mathrm{Bernoulli}(p_i)
-\]
-
-\[
+y_i \sim \mathrm{Bernoulli}(p_i), \quad
 \mathrm{logit}(p_i) = \alpha + x_i^T\beta
 \]
 
 \[
-\alpha \sim \mathcal{N}(0,1), \quad \beta_j \sim \mathcal{N}(0,2.5)
+\alpha \sim \mathcal{N}(0,1), \quad
+\beta_j \sim \mathcal{N}(0,2.5)
 \]
 
-The logistic model supports direct odds-ratio interpretation:
-
-\[
-\mathrm{OR}_j = \exp(\beta_j)
-\]
-
-Posterior medians and 95% HDIs of these odds ratios are generated by
-`python run_project.py evaluate`.
-
-### 4.2 Bayesian Probit Regression
-
-\[
-y_i \sim \mathrm{Bernoulli}(p_i)
-\]
+The probit model replaces the logistic link with the normal CDF:
 
 \[
 p_i = \Phi(\alpha + x_i^T\beta)
 \]
 
-The probit model has a latent-normal interpretation:
-
-\[
-z_i \sim \mathcal{N}(\alpha + x_i^T\beta, 1), \quad y_i = I(z_i > 0)
-\]
-
-Probit coefficients are interpreted on the latent-normal scale. They should not
-be exponentiated as odds ratios.
-
-### 4.3 Grouped Hierarchical Shrinkage Logistic Regression
-
-The project adds a structured Bayesian model beyond ordinary logistic/probit
-regression. Predictors are assigned to clinically motivated groups:
-
-| Group | Predictors |
-|---|---|
-| Demographics | `male`, `age`, `education` |
-| Behavior | `currentSmoker`, `cigsPerDay` |
-| Medical history | `BPMeds`, `prevalentStroke`, `prevalentHyp`, `diabetes` |
-| Vitals | `sysBP`, `diaBP`, `BMI`, `heartRate` |
-| Labs | `totChol`, `glucose` |
-
-The hierarchical logistic model is:
-
-\[
-y_i \sim \mathrm{Bernoulli}(p_i), \quad
-\mathrm{logit}(p_i)=\alpha+x_i^T\beta
-\]
+The hierarchical logistic model assigns predictors to clinical groups and
+learns a shrinkage scale for each group:
 
 \[
 \beta_j \sim \mathcal{N}(0,\tau_{g(j)}^2), \quad
 \tau_g \sim \mathrm{HalfNormal}(1)
 \]
 
-where \(g(j)\) maps predictor \(j\) to its clinical group. This is a
-methodological addition: instead of applying one fixed prior scale to every
-coefficient, the model learns how strongly to shrink each family of clinical
-features. The posterior of \(\tau_g\) can be interpreted as evidence about the
-relative predictive strength and stability of each feature family.
+This model lets the posterior decide which feature families require stronger or
+weaker regularization.
 
-### 4.4 Priors and Sensitivity
+## 5. Decision Layer
 
-The predictors are standardized, so Normal priors on coefficients are
-interpretable on a common scale. The baseline prior
-\(\beta_j \sim \mathcal{N}(0,2.5)\) is weakly informative; a shrinkage
-sensitivity run with \(\beta_j \sim \mathcal{N}(0,0.5)\) is included to test
-whether correlated clinical variables create unstable posteriors.
-
-## 5. Baseline Sanity Check
-
-A frequentist logistic regression baseline is included as a reproducible sanity
-check for the split, preprocessing, and metric code. The report does not
-hard-code baseline values before the workflow is run. Execute:
-
-```powershell
-python run_project.py baseline
-```
-
-The script writes baseline outputs to `outputs/baseline_metrics.json`,
-`outputs/baseline_predictions.csv`, and `outputs/baseline_cost_curve.png`.
-
-The purpose of this step is to confirm that the deterministic preprocessing
-pipeline works before running the Bayesian models. Because the target is
-imbalanced, accuracy should be interpreted cautiously and PR-AUC, Brier score,
-calibration, and decision cost should receive more attention.
-
-## 6. Bayesian Evaluation Plan
-
-The `evaluate` step compares Bayesian logistic, Bayesian probit, and grouped
-hierarchical Bayesian logistic models using:
-
-- MCMC diagnostics: divergences, \(\hat{R}\), bulk ESS, and tail ESS.
-- Posterior predictive mean risk for each test patient.
-- 95% HDI intervals for patient-level risk.
-- ROC-AUC, PR-AUC, Brier score, and calibration curves.
-- WAIC and PSIS-LOO for approximate out-of-sample model comparison.
-- Logistic-model odds-ratio posterior summaries.
-- Group-scale posterior summaries for the hierarchical model.
-
-The posterior predictive code explicitly samples the deterministic risk
-variable `p`, not the binary observed node `y_obs`. This is essential: sampling
-only the binary outcome would collapse predictions into 0/1 draws and would not
-provide continuous risk intervals.
-
-## 7. Bayesian Decision and Optimization Algorithms
-
-Clinical screening often treats false negatives as more costly than false
-positives. Let:
-
-- \(C_{FP}\): cost of unnecessary follow-up.
-- \(C_{FN}\): cost of missing a patient who will develop CHD.
-
-Intervene when expected loss for intervention is lower than non-intervention:
-
-\[
-C_{FP}(1-p) < C_{FN}p
-\]
-
-This yields the Bayes-optimal threshold:
+Medical screening often treats false negatives as more costly than false
+positives. If \(C_{FP}\) is the cost of unnecessary follow-up and \(C_{FN}\) is
+the cost of missing a case, the cost-sensitive threshold is:
 
 \[
 p^* = \frac{C_{FP}}{C_{FP}+C_{FN}}
 \]
 
-For example, if \(C_{FN}=5C_{FP}\), then \(p^*=1/6 \approx 0.167\). The
-baseline and Bayesian evaluation scripts report the resulting sensitivity,
-specificity, and observed test-set cost after the workflow is run. This makes
-the threshold trade-off reproducible instead of embedding precomputed values in
-the report.
+With \(C_{FP}=1\) and \(C_{FN}=5\), the threshold is \(p^*=0.167\), much lower
+than the default 0.5 threshold.
 
-### 7.1 Posterior Expected-Loss Triage With Reject Option
+The project then extends forced binary classification into a three-action
+triage rule:
 
-The algorithmic contribution is a three-action triage rule. For each patient,
-the Bayesian model produces posterior risk samples:
+- `low`: low risk / no immediate intervention;
+- `high`: high risk / intervention or follow-up;
+- `refer`: uncertain case requiring further testing.
+
+For patient \(i\), posterior or bootstrap risk samples are:
 
 \[
 p_i^{(1)}, p_i^{(2)}, \ldots, p_i^{(S)}
 \]
 
-The available actions are:
-
-- \(a=0\): low risk / no intervention.
-- \(a=1\): high risk / intervention or follow-up.
-- \(a=r\): refer for further testing.
-
-The posterior expected losses are:
+The expected losses are:
 
 \[
-L_i(a=0)=C_{FN}\mathbb{E}[p_i\mid D]
+L_i(low)=C_{FN}\mathbb{E}[p_i]
 \]
 
 \[
-L_i(a=1)=C_{FP}\mathbb{E}[1-p_i\mid D]
+L_i(high)=C_{FP}\mathbb{E}[1-p_i]
 \]
 
 \[
-L_i(a=r)=C_{REF}
+L_i(refer)=C_{REF}
 \]
 
-The rule first chooses the action with the smallest posterior expected loss.
-It then checks posterior confidence around the cost-based threshold \(p^*\):
+The policy also checks uncertainty around \(p^*\):
 
 \[
-\Pr(p_i>p^*\mid D) \ge q_{high} \Rightarrow \text{high risk}
+\Pr(p_i > p^*) \le q_{low} \Rightarrow low
 \]
 
 \[
-\Pr(p_i>p^*\mid D) \le q_{low} \Rightarrow \text{low risk}
+\Pr(p_i > p^*) \ge q_{high} \Rightarrow high
 \]
 
-If neither condition is met, the patient is assigned to `refer`. This creates a
-clinically realistic reject option: the model can explicitly say that more
-testing is preferable to an overconfident binary label.
+Otherwise, the patient is referred.
 
-### 7.2 Bayesian Optimization for Triage Policy Calibration
+## 6. Bayesian Optimization
 
-The project uses Bayesian optimization as a downstream policy-calibration
-method. After MCMC has produced posterior risk samples, each candidate triage
-policy can be evaluated by replaying its `low`, `high`, and `refer` decisions
-on held-out patients. The Bayesian model is therefore sampled once, and the
-optimization step adjusts only the decision policy that acts on the posterior
-risk distribution.
-
-This choice is appropriate because the policy objective is not a smooth model
-training loss. It combines asymmetric clinical error costs, a referral penalty,
-posterior confidence cutoffs, and discrete triage actions. The loss formula is
-explicit, but the final validation cost depends on threshold-based decisions
-over observed patients, so the objective is best treated as a gray-box
-calibration problem: partly specified by the clinical decision rule and partly
-measured empirically on held-out posterior risk samples. Bayesian optimization
-provides a sample-efficient way to search this policy space without rerunning
-the expensive Bayesian inference step.
-
-The tuned policy parameters are:
+The optimized policy parameters are:
 
 | Parameter | Meaning |
 |---|---|
-| \(q_{low}\) | posterior confidence cutoff for low-risk assignment |
-| \(q_{high}\) | posterior confidence cutoff for high-risk assignment |
-| \(C_{REF}^{decision}\) | internal referral cost used by the triage rule |
+| \(q_{low}\) | confidence cutoff for low-risk decisions |
+| \(q_{high}\) | confidence cutoff for high-risk decisions |
+| \(C_{REF}^{decision}\) | internal referral cost used during policy selection |
 
 The validation objective is:
 
 \[
 \text{objective} =
 \text{average clinical cost}
-\;+\;
-\lambda \cdot \text{referral rate}
++ \lambda \cdot \text{referral rate}
 \]
 
-A Gaussian-process surrogate model is fit to evaluated policy settings, and a
-lower-confidence-bound acquisition rule proposes the next policy to test. This
-turns the final clinical decision rule into a tunable Bayesian decision policy:
-the statistical model estimates patient risk, while the optimization layer
-calibrates how that risk should be converted into an actionable triage
-recommendation.
+The optimizer fits a Gaussian-process surrogate over this policy space. It uses
+a dynamic lower-confidence-bound acquisition rule: the exploration weight is
+larger early in the search and smaller later in the search. This connects the
+implementation to the proposal's idea of dynamically balancing exploration and
+exploitation.
 
-## 8. Results
+This optimization is intentionally placed downstream of risk modeling. MCMC does
+not need to be rerun for every candidate policy; the optimizer reuses saved risk
+samples and searches only over decision parameters.
 
-The full workflow was run successfully on 2 June 2026. The generated artifacts
-are stored in `outputs/`, including metric tables, posterior summaries,
-comparison plots, posterior risk samples, and optimized triage decisions.
+The revised implementation also supports cross-task transfer initialization.
+After optimizing one dataset, its best policy parameters can be inserted into
+the initial candidate pool for the next dataset. This directly operationalizes
+the proposal's idea of using prior optimization knowledge from similar tasks
+while keeping the search budget fixed.
 
-### 8.1 Predictive Performance
+## 7. Generalization and Ablation Experiments
 
-At the default 0.5 classification threshold, the four fitted models produced
-the following held-out test performance:
+The new command:
+
+```powershell
+python run_project.py generalize
+```
+
+runs the cross-dataset experiment. The alias:
+
+```powershell
+python run_project.py ablate
+```
+
+runs the same workflow, because generalization and ablation outputs are produced
+together.
+
+For auxiliary datasets, the project uses bootstrap logistic models to generate
+risk-sample ensembles. This is a lightweight uncertainty proxy used only for
+generalization checks. The full Bayesian posterior analysis remains the
+Framingham PyMC workflow.
+
+The generated outputs include:
+
+| Output | Meaning |
+|---|---|
+| `outputs/generalization/dataset_summary.csv` | sample size, feature count, class balance, missingness |
+| `outputs/generalization/generalization_summary.csv` | main comparison table across datasets and methods |
+| `outputs/generalization/<dataset>/bo_history.csv` | BO search history |
+| `outputs/generalization/<dataset>/bo_no_transfer_history.csv` | BO history without transfer initialization |
+| `outputs/generalization/<dataset>/random_search_history.csv` | random-search baseline history |
+| `outputs/generalization/<dataset>/transfer_initial_points.csv` | transferred policy points used to seed BO |
+| `outputs/generalization/<dataset>/policy_best.json` | best policy and final split metrics |
+| `outputs/generalization/<dataset>/search_convergence.png` | best-so-far convergence curve for BO and random search |
+| `outputs/generalization/generalization_costs.png` | decision-cost comparison plot |
+| `outputs/generalization/cost_referral_tradeoff.png` | cost-referral trade-off plot |
+
+The ablations compare:
+
+| Method | Purpose |
+|---|---|
+| fixed triage | tests whether tuning is useful |
+| BO triage | proposed optimized policy with transfer initialization when available |
+| BO no-transfer triage | tests whether transferred prior policies help |
+| random-search triage | tests whether BO is better than uninformed search |
+| mean-only BO triage | tests whether uncertainty samples matter |
+| no-refer final | tests whether the reject option matters |
+| forced binary cost threshold | tests ordinary low/high decision making |
+
+## 8. Existing Framingham Results
+
+The full Framingham workflow was previously run successfully and produced the
+following held-out test performance at the default 0.5 threshold:
 
 | Model | ROC-AUC | PR-AUC | Brier | Accuracy | Sensitivity | Specificity | Precision |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -320,71 +249,12 @@ the following held-out test performance:
 | Bayesian Probit | 0.673 | 0.267 | 0.133 | 82.43% | 10.08% | 95.41% | 28.26% |
 | Hierarchical Logistic | 0.700 | 0.296 | 0.121 | 84.79% | 4.65% | 99.17% | 50.00% |
 
-The highest raw accuracy is achieved by the grouped hierarchical logistic model
-at **84.79%**. However, accuracy is not the main success measure in this
-imbalanced screening problem: the positive class is only about 15.2% of the
-dataset, so a high threshold can produce high accuracy while missing many CHD
-cases. This is visible in the low sensitivity values at the default 0.5
-threshold.
+Accuracy is not the main success measure because the positive class is only
+about 15.2%. PR-AUC, Brier score, calibration, sensitivity, and cost-sensitive
+decision metrics are more important.
 
-The more clinically relevant interpretation is that the Bayesian logistic and
-hierarchical logistic models have similar discrimination, with ROC-AUC around
-0.70 and PR-AUC around 0.29. The hierarchical model has the best Brier score
-among the fitted Bayesian models, suggesting slightly better probability
-calibration.
-
-### 8.2 Bayesian Model Comparison
-
-Approximate out-of-sample model comparison using WAIC and PSIS-LOO ranks the
-hierarchical logistic model first:
-
-| Model | WAIC Rank | elpd WAIC | LOO Rank | elpd LOO |
-|---|---:|---:|---:|---:|
-| Hierarchical Logistic | 1 | -1286.16 | 1 | -1286.17 |
-| Bayesian Logistic | 2 | -1286.96 | 2 | -1286.98 |
-| Bayesian Probit | 3 | -7327.39 | 3 | -3982.31 |
-
-The hierarchical logistic and ordinary Bayesian logistic models are extremely
-close by WAIC/LOO: the elpd difference is only about 0.81. This means the
-hierarchical model is preferred, but the evidence over the simpler logistic
-model is modest. The probit model has WAIC/LOO warnings and much worse elpd,
-so it should not be the primary reported model.
-
-### 8.3 Posterior Effects
-
-For the hierarchical logistic model, all reported coefficients have
-\(\hat{R}=1.00\), indicating good MCMC convergence by this diagnostic. The
-largest posterior odds-ratio medians are:
-
-| Feature | Median OR | 95% HDI |
-|---|---:|---:|
-| `age` | 1.79 | [1.60, 2.02] |
-| `sysBP` | 1.30 | [1.09, 1.53] |
-| `cigsPerDay` | 1.27 | [1.08, 1.47] |
-| `male` | 1.24 | [1.11, 1.38] |
-| `glucose` | 1.19 | [1.07, 1.33] |
-
-Because predictors are standardized, these odds ratios are interpreted per
-one-standard-deviation increase for continuous predictors. The strongest and
-most stable risk signals are age, systolic blood pressure, cigarettes per day,
-male sex, and glucose.
-
-The learned group-scale posteriors also support this interpretation. The
-demographic group has the largest posterior mean scale (0.545), followed by
-behavioral predictors (0.398), laboratory measurements (0.347), vitals (0.220),
-and medical history indicators (0.106). This suggests that the model found the
-strongest regularized signal in demographic and behavioral variables.
-
-### 8.4 Cost-Sensitive Decision Analysis
-
-Using the asymmetric cost setting \(C_{FP}=1\) and \(C_{FN}=5\), the
-Bayes-optimal probability threshold is:
-
-\[
-p^*=\frac{1}{1+5}=0.167
-\]
-
-At this cost-based threshold, the hierarchical logistic model reaches:
+Using \(C_{FP}=1\) and \(C_{FN}=5\), the hierarchical logistic model reached the
+following cost-threshold performance:
 
 | Metric | Value |
 |---|---:|
@@ -396,80 +266,93 @@ At this cost-based threshold, the hierarchical logistic model reaches:
 | False negatives | 53 |
 | Total observed cost | 468 |
 
-This threshold lowers overall accuracy, but it substantially increases
-sensitivity compared with the default 0.5 threshold. That trade-off is
-appropriate when missing a future CHD case is assumed to be more costly than
-unnecessary follow-up.
+The optimized three-action triage policy classified about 73.82% of final-split
+patients directly and referred 26.18% for additional testing. Its average cost
+on the final split was 0.538.
 
-### 8.5 Optimized Three-Action Triage
+## 9. How to Analyze New Results
 
-The Bayesian optimization step tuned the posterior triage policy on a
-validation split and evaluated it on a final held-out split of posterior
-predictions. The selected validation policy used:
+After running:
 
-| Parameter | Value |
-|---|---:|
-| \(q_{low}\) | 0.010 |
-| \(q_{high}\) | 0.986 |
-| Internal referral cost | 1.313 |
+```powershell
+python run_project.py generalize
+```
 
-On the final split, the optimized triage policy produced:
+the main table is `outputs/generalization/generalization_summary.csv`.
 
-| Quantity | Value |
-|---|---:|
-| Final patients | 424 |
-| Low-risk decisions | 224 |
-| High-risk decisions | 89 |
-| Refer decisions | 111 |
-| Coverage | 73.82% |
-| Referral rate | 26.18% |
-| Average cost | 0.538 |
-| Decided-case accuracy | 74.12% |
-| Decided true negatives | 208 |
-| Decided false positives | 65 |
-| Decided false negatives | 16 |
-| Decided true positives | 24 |
+The model is accurate if:
 
-The substantive result is that the Bayesian model is most useful when treated
-as a probabilistic triage system rather than a hard classifier. It can classify
-about 74% of cases directly and refer about 26% for additional testing, while
-using posterior uncertainty and asymmetric clinical costs to avoid forcing
-uncertain cases into overconfident labels.
+- ROC-AUC and PR-AUC are clearly above baseline;
+- Brier score is low;
+- calibration is reasonable;
+- sensitivity improves under cost-sensitive thresholds.
 
-## 9. Limitations
+The decision policy is useful if:
 
-- The dataset is observational and should not be interpreted causally.
-- The target is long-horizon CHD risk, not an immediate clinical diagnosis.
-- The current imputation is a single imputed dataset; full multiple imputation
-  would better propagate missing-data uncertainty.
-- Logistic/probit models assume linear effects in the standardized predictors.
-- The Bayesian optimization step calibrates the triage policy, not the MCMC
-  model itself; this avoids repeated expensive posterior sampling but means
-  prior hyperparameters are not optimized by BO.
+- BO triage has lower average cost than fixed triage;
+- transfer-initialized BO improves or accelerates BO compared with
+  no-transfer BO on later datasets;
+- BO triage is better than or more sample-efficient than random search;
+- no-refer forced binary decisions create more false negatives or higher cost;
+- mean-only triage performs worse than risk-sample triage when uncertainty is
+  important.
+
+The BO search itself should be inspected through each dataset's
+`search_convergence.png`: the best-so-far objective should decrease quickly and
+ideally match or beat random search under the same policy-evaluation budget. The
+cost-referral trade-off plot should be used to check whether a lower cost is
+achieved by a clinically reasonable referral rate rather than by referring
+nearly all cases.
+
+The method generalizes if:
+
+- the same policy optimizer runs without dataset-specific hand tuning;
+- BO triage remains competitive across breast cancer, mammographic mass,
+  Cleveland heart disease, and CDC diabetes;
+- the improvement is not restricted to one dataset.
+
+The method is robust if results remain stable under:
+
+- different random seeds;
+- different train/test splits;
+- different false-negative costs;
+- different referral costs;
+- different BO budgets;
+- different bootstrap sample counts;
+- different row caps for the CDC dataset.
+
+## 10. Limitations
+
+- The Framingham dataset is observational and should not be interpreted
+  causally.
+- Framingham predicts 10-year CHD risk, not immediate clinical diagnosis.
+- Auxiliary datasets use bootstrap logistic uncertainty rather than full MCMC.
+- The current triage costs are illustrative, not clinically validated.
+- The BO layer calibrates decision policy, not the Bayesian model priors.
 - The project is educational and is not suitable for clinical deployment.
 
-## 10. Conclusion
+## 11. Conclusion
 
-The project implements a complete Bayesian binary-classification workflow for
-cardiovascular risk prediction: leakage-safe preprocessing, Bayesian logit and
-probit models, grouped hierarchical shrinkage, posterior predictive
-uncertainty, model comparison, Bayesian optimization of triage-policy
-calibration, and expected-loss decision rules with a reject option. This
-matches the Bayesian machine learning project theme while adding clear
-method-level contributions.
+The revised project is best described as a generalizable Bayesian decision
+calibration framework for medical risk triage. Framingham provides the main
+Bayesian case study with posterior uncertainty and interpretable clinical
+effects. The new generalization workflow tests whether the same BO-calibrated
+triage layer can transfer to other binary medical datasets, and whether prior
+optimized policies can accelerate later BO searches through transfer
+initialization.
 
-The empirical result is that the grouped hierarchical Bayesian logistic model
-is the best overall model, although it only modestly improves on ordinary
-Bayesian logistic regression. Its raw accuracy is **84.79%**, but the more
-important finding is the decision-analysis result: lowering the decision
-threshold according to asymmetric clinical costs raises sensitivity to
-**58.91%**, and the optimized three-action triage policy directly classifies
-about **73.82%** of held-out patients while referring **26.18%** for further
-testing.
+This structure better matches the proposal's broader ambition while keeping the
+implementation realistic: the project demonstrates practical generalization
+through multiple datasets and ablation experiments, rather than claiming a
+large-scale AutoML system or a formal mathematical proof of universality.
 
 ## References
 
-- Framingham Heart Study.
+- Framingham Heart Study dataset.
+- UCI Machine Learning Repository: Breast Cancer Wisconsin Diagnostic.
+- UCI Machine Learning Repository: Mammographic Mass.
+- UCI Machine Learning Repository: Heart Disease Cleveland.
+- UCI Machine Learning Repository: CDC Diabetes Health Indicators.
 - PyMC documentation.
 - ArviZ documentation for diagnostics, WAIC, and PSIS-LOO.
 - Gelman, Jakulin, Pittau, and Su (2008), weakly informative priors for logistic

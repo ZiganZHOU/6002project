@@ -1,60 +1,52 @@
-# Bayesian Machine Learning for Cardiovascular Disease Diagnosis
+# Generalizable Bayesian Optimization for Medical Risk Triage
 
-Course project for **Bayesian Machine Learning**. The project uses Bayesian
-probit and logistic regression to perform an automated medical diagnosis task:
-predicting whether a patient will develop coronary heart disease (CHD) within
-10 years.
+Course project for **Bayesian Machine Learning**. The project started as a
+Bayesian cardiovascular disease diagnosis workflow and has been extended into a
+generalizable decision-calibration framework:
 
-The implementation is intentionally probability-focused. Instead of reporting
-only a hard 0/1 label, the Bayesian models produce posterior distributions over
-patient risk and coefficient effects.
+1. A probabilistic risk model estimates patient-level disease risk.
+2. The model exposes uncertainty through posterior or bootstrap risk samples.
+3. A three-action triage policy converts risk into `low`, `high`, or `refer`.
+4. Bayesian optimization calibrates the triage policy under asymmetric clinical
+   costs.
+5. Additional datasets test whether the decision-calibration layer transfers
+   beyond the original cardiovascular task.
+
+The main Bayesian case study remains the Framingham 10-year CHD prediction
+task. Cross-dataset experiments use lightweight bootstrap logistic risk samples
+so that generalization and ablation studies can be run quickly without repeated
+MCMC.
 
 ## Project Fit
 
-This repository directly addresses the project prompt:
+- **Bayesian model**: PyMC Bayesian logistic/probit regression for the main
+  Framingham case study.
+- **Bayesian output**: posterior predictive risk samples, risk intervals,
+  coefficient uncertainty, WAIC/PSIS-LOO, and cost-sensitive decisions.
+- **Optimization contribution**: Gaussian-process Bayesian optimization tunes
+  the downstream triage-policy parameters using saved risk samples.
+- **Generalization claim**: the optimized decision layer is evaluated on
+  multiple binary medical datasets, not only on the original CHD dataset.
+- **Ablation claim**: BO triage is compared against fixed policy, BO without
+  transfer initialization, random search, forced binary decisions, and
+  mean-risk-only decision making.
 
-- **Bayesian model**: Bayesian logistic and Bayesian probit regression in PyMC.
-- **Machine learning task**: binary supervised classification.
-- **Automated disease diagnosis**: 10-year CHD risk prediction from clinical
-  and demographic covariates.
-- **Critical Bayesian output**: posterior predictive risk intervals, posterior
-  coefficient uncertainty, WAIC/PSIS-LOO comparison, and cost-sensitive
-  decision thresholds.
+## Datasets
 
-## Methodological Contributions
+Raw external datasets are stored in `data/raw_external/`. Modeling-ready CSVs
+are stored in `data/` with a unified binary target column named `target`, except
+for the original Framingham file where the target remains `TenYearCHD`.
 
-The project now includes three method-level extensions beyond a direct
-application of Bayesian logistic/probit regression:
+| Dataset | Local File | Role | Notes |
+|---|---|---|---|
+| Framingham Heart Study | `data/framingham.csv` | Main Bayesian case study | 10-year CHD risk, 4,240 rows, 15 predictors |
+| Breast Cancer Wisconsin Diagnostic | `data/breast_cancer_wisconsin_diagnostic.csv` | Cross-disease generalization | Malignant vs benign, clean numeric data |
+| Mammographic Mass | `data/mammographic_mass.csv` | Triage-style generalization | Malignant vs benign, has missing values |
+| UCI Cleveland Heart Disease | `data/heart_disease_cleveland.csv` | Same-domain generalization | Heart disease present vs absent |
+| CDC Diabetes Health Indicators | `data/cdc_diabetes_health_indicators.csv` | Large-data robustness | Diabetes/prediabetes vs healthy; sampled by default |
 
-1. **Grouped hierarchical shrinkage prior**: predictors are grouped by clinical
-   meaning (demographics, behavior, medical history, vitals, labs), and each
-   group receives a learned shrinkage scale. This lets the model infer which
-   clinical feature families need stronger or weaker regularization.
-2. **Posterior expected-loss triage with reject option**: the final decision is
-   not forced into low/high risk. The model can output `refer` when posterior
-   risk is too uncertain or expected loss favors additional testing.
-3. **Bayesian optimization for triage policy calibration**: a Gaussian-process
-   surrogate with a lower-confidence-bound acquisition function tunes the
-   triage parameters `q_low`, `q_high`, and internal referral cost using saved
-   posterior risk samples. This treats the final clinical decision rule as a
-   downstream policy-calibration problem, rather than rerunning MCMC or tuning
-   PyMC model hyperparameters.
-
-## Dataset
-
-**Framingham Heart Study Dataset**  
-Source: [Kaggle mirror](https://www.kaggle.com/datasets/aasheesh200/framingham-heart-study-dataset)
-
-Download `framingham.csv` and place it in `data/`. Raw data are intentionally
-not tracked by git.
-
-Local dataset snapshot used during development:
-
-- Rows: 4,240
-- Predictors: 15
-- Target: `TenYearCHD`
-- Positive class: 644 patients, or 15.2%
-- Largest missingness source: `glucose` with 388 missing values
+The UCI `.data` files are preserved as raw files. CSV versions add explicit
+column names and a unified binary `target` column for reproducible modeling.
 
 ## Setup
 
@@ -64,125 +56,163 @@ venv\Scripts\activate
 python -m pip install -r requirements.txt
 ```
 
-If you already have the virtual environment and only need to install packages:
-
-```powershell
-venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
 ## Run Workflow
 
-The project no longer depends on notebooks. Use the root runner for both full
-and stepwise execution.
-
 ```powershell
-# Full project: EDA, preprocessing, baseline, sampling, evaluation, optimization
+# Full project: Framingham analysis plus cross-dataset generalization
 python run_project.py all
 
-# Quick non-Bayesian check when PyMC is not installed yet
+# Skip expensive PyMC sampling when only checking the non-Bayesian parts
 python run_project.py all --skip-bayes
 
-# Stepwise execution
+# Skip cross-dataset generalization if you only need the main case study
+python run_project.py all --skip-generalization
+```
+
+Stepwise execution:
+
+```powershell
 python run_project.py eda
 python run_project.py preprocess
 python run_project.py baseline
 python run_project.py bayes
 python run_project.py evaluate
 python run_project.py optimize
+python run_project.py generalize
+python run_project.py ablate
 ```
 
-For a short smoke test of the Bayesian code, reduce the sampler settings:
+For a short smoke test of the Bayesian code:
 
 ```powershell
 python run_project.py bayes --draws 500 --tune 500 --chains 2 --no-shrinkage
 python run_project.py evaluate --prediction-draws 500
 ```
 
-The `bayes` step is the long-running MCMC step. It writes
-`data/idata_logistic.nc`, `data/idata_logistic_shrink.nc`, and
-`data/idata_probit.nc`, and `data/idata_hierarchical_logistic.nc`; those files
-are ignored because they can be large. Plots, metrics, posterior risk samples,
-Bayesian-optimization history, and triage decisions are written to `outputs/`.
+For a short smoke test of the new generalization layer:
+
+```powershell
+python run_project.py generalize `
+  --generalization-datasets breast_cancer `
+  --generalization-bootstrap-samples 5 `
+  --generalization-bo-initial 3 `
+  --generalization-bo-iter 2 `
+  --generalization-bo-candidates 50
+```
+
+Transfer initialization is enabled by default. To disable it for sensitivity
+checks:
+
+```powershell
+python run_project.py generalize --no-transfer-initialization
+```
+
+The `bayes` step is the long-running MCMC step. It writes trace files to
+`data/*.nc`. The `generalize`/`ablate` steps write summaries, BO histories, and
+ablation outputs to `outputs/generalization/`, including per-dataset
+convergence plots and a cost-referral trade-off plot.
 
 ## Methodology
 
-1. **Exploratory analysis**
-   - Check class imbalance, missingness, feature distributions, and
-     correlations.
-   - Compute VIF on train-only imputed and standardized data with an intercept,
-     avoiding inflated VIF from raw uncentered measurements.
+1. **Leakage-safe preprocessing**
+   - Split raw data before imputation and scaling.
+   - Fit imputers/scalers on training data only.
+   - Restore simple clinical constraints where relevant.
+   - Standardize numeric predictors before logistic/Bayesian models.
 
-2. **Leakage-safe preprocessing**
-   - Split raw data first with stratification.
-   - Fit `IterativeImputer` on the training set only.
-   - Restore simple domain constraints after imputation: binary variables are
-     rounded/clipped to 0/1, education is clipped to its ordinal range, and
-     physiologic measurements are clipped to nonnegative values.
-   - Fit `StandardScaler` on training data only and transform train/test.
+2. **Main Bayesian risk modeling**
+   - Frequentist logistic regression is used as a sanity-check baseline.
+   - Bayesian logistic regression and Bayesian probit regression model CHD risk.
+   - A grouped hierarchical Bayesian logistic model learns group-specific
+     shrinkage across clinical feature families.
 
-3. **Models**
-   - Frequentist logistic regression as a sanity-check baseline.
-   - Bayesian logistic regression with weakly informative Normal priors.
-   - Bayesian probit regression with the same design matrix and comparable
-     priors.
-   - Shrinkage prior sensitivity for the logistic model.
-   - Grouped hierarchical Bayesian logistic regression with learned
-     group-specific shrinkage scales.
+3. **Uncertainty-aware decision layer**
+   - Risk samples are used to estimate mean risk and uncertainty around the
+     cost-based decision threshold.
+   - The triage policy can output `refer` instead of forcing every uncertain
+     patient into low/high risk.
 
-4. **Evaluation**
-   - ROC-AUC, PR-AUC, Brier score, calibration curves.
-   - MCMC diagnostics: divergences, R-hat, effective sample size.
-   - WAIC and PSIS-LOO for Bayesian model comparison.
-   - Bayesian odds-ratio summaries for logistic regression only.
-   - Posterior predictive risk intervals for individual patients.
-   - Asymmetric clinical loss with threshold
-     `C_FP / (C_FP + C_FN)`.
-   - Three-action posterior triage: `low`, `high`, and `refer`.
-   - Bayesian optimization of downstream triage-policy parameters on held-out
-     posterior risk samples.
+4. **Bayesian optimization**
+   - Tuned parameters are `q_low`, `q_high`, and internal referral cost.
+   - The objective is average clinical cost plus a penalty for referral rate.
+   - The acquisition function uses a dynamic lower-confidence-bound schedule:
+     more exploration early, more exploitation later.
+   - Cross-dataset transfer initialization can seed a new task with previously
+     optimized triage-policy parameters.
 
-## Baseline Sanity Check
+5. **Generalization and ablation**
+   - External datasets reuse the same policy optimizer.
+   - Bootstrap logistic ensembles provide fast risk samples for auxiliary
+     experiments.
+   - BO triage is compared with fixed triage, BO without transfer initialization,
+     random search, no-refer forced binary decisions, and mean-risk-only triage.
 
-The baseline results are intentionally not hard-coded in the README. Run:
+## Evaluation
 
-```powershell
-python run_project.py baseline
-```
+Predictive accuracy is evaluated with:
 
-This writes the reproducible baseline metrics and decision-cost outputs to:
+- ROC-AUC
+- PR-AUC
+- Brier score
+- Calibration curves
+- Accuracy, sensitivity, specificity, and precision
 
-```text
-outputs/baseline_metrics.json
-outputs/baseline_predictions.csv
-outputs/baseline_cost_curve.csv
-outputs/baseline_cost_curve.png
-```
+Decision quality is evaluated with:
 
-Because the target is imbalanced, the project treats accuracy as secondary.
-The main workflow emphasizes PR-AUC, calibration, posterior uncertainty, and
-cost-sensitive triage rather than a default 0.5 classification threshold.
+- Cost-sensitive threshold performance
+- Average clinical cost
+- Referral rate
+- Coverage
+- Decided-case accuracy
+- False negatives and false positives
+- BO best-so-far convergence curves
+- Cost-referral trade-off plots
+
+Generalization is evaluated by asking whether the same decision-calibration
+framework improves or remains competitive across breast cancer, mammographic
+mass, Cleveland heart disease, and CDC diabetes datasets.
+
+Robustness can be checked by changing:
+
+- random seed
+- train/test split
+- false-negative cost
+- referral cost
+- BO budget
+- bootstrap sample count
+- CDC row cap
 
 ## Project Structure
 
 ```text
 .
-|-- data/                      # Raw data and generated traces; raw CSV not tracked
+|-- data/
+|   |-- raw_external/          # Original downloaded UCI/Kaggle files
+|   |-- framingham.csv
+|   |-- breast_cancer_wisconsin_diagnostic.csv
+|   |-- mammographic_mass.csv
+|   |-- heart_disease_cleveland.csv
+|   `-- cdc_diabetes_health_indicators.csv
 |-- outputs/                   # Generated metrics/plots; not tracked
 |-- report/
 |   `-- report.md
 |-- src/
+|   |-- datasets.py
 |   |-- preprocess.py
 |   |-- model.py
-|   `-- evaluate.py
-|-- run_project.py             # Full and stepwise project runner
+|   |-- evaluate.py
+|   `-- generalization.py
+|-- run_project.py
 |-- requirements.txt
 `-- README.md
 ```
 
 ## Notes
 
-- Odds ratios are valid for the logistic link only: `OR = exp(beta)`.
+- Odds ratios are valid for logistic models only: `OR = exp(beta)`.
 - Probit coefficients live on the latent-normal scale and should not be
   exponentiated as odds ratios.
+- Auxiliary bootstrap experiments are used for fast generalization checks; the
+  main Bayesian posterior analysis remains the Framingham PyMC workflow.
 - This is an educational risk-modeling project, not a clinical deployment
   system.

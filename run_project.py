@@ -1,5 +1,5 @@
 """
-End-to-end and stepwise runner for the Bayesian CHD risk-prediction project.
+End-to-end and stepwise runner for Bayesian medical risk triage experiments.
 
 Examples
 --------
@@ -15,6 +15,8 @@ Run a specific step:
     python run_project.py bayes --draws 1000 --tune 1000 --chains 4
     python run_project.py evaluate
     python run_project.py optimize
+    python run_project.py generalize
+    python run_project.py ablate
 """
 
 from __future__ import annotations
@@ -48,6 +50,8 @@ from src.evaluate import (
     triage_metrics,
 )
 from src.evaluate import plot_posterior_coefs
+from src.datasets import DEFAULT_GENERALIZATION_DATASETS
+from src.generalization import run_generalization_experiments
 from src.model import (
     build_bayesian_logistic,
     build_bayesian_probit,
@@ -70,6 +74,7 @@ from src.preprocess import (
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA = ROOT / "data" / "framingham.csv"
+DEFAULT_DATA_DIR = ROOT / "data"
 DEFAULT_OUTPUTS = ROOT / "outputs"
 
 
@@ -742,6 +747,39 @@ def run_optimize(data_path: Path, output_dir: Path, args: argparse.Namespace) ->
     print("[optimize] Done.")
 
 
+def parse_dataset_list(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def run_generalize(data_dir: Path, output_dir: Path, args: argparse.Namespace) -> None:
+    print("[generalize] Running cross-dataset BO triage and ablation experiments.")
+    dataset_names = parse_dataset_list(args.generalization_datasets)
+    summary = run_generalization_experiments(
+        data_dir=data_dir,
+        output_dir=output_dir / "generalization",
+        dataset_names=dataset_names,
+        n_bootstrap=args.generalization_bootstrap_samples,
+        test_size=args.generalization_test_size,
+        policy_test_size=args.policy_test_size,
+        c_fp=args.c_fp,
+        c_fn=args.c_fn,
+        eval_referral_cost=args.eval_referral_cost,
+        abstention_penalty=args.abstention_penalty,
+        bo_initial=args.generalization_bo_initial,
+        bo_iter=args.generalization_bo_iter,
+        bo_candidates=args.generalization_bo_candidates,
+        random_state=args.random_seed,
+        max_rows=args.generalization_max_rows,
+        use_transfer_initialization=not args.no_transfer_initialization,
+        max_transfer_points=args.max_transfer_points,
+    )
+    print(
+        "[generalize] Done. Summary written to",
+        output_dir / "generalization" / "generalization_summary.csv",
+    )
+    print(summary[["dataset", "method", "average_cost", "referral_rate"]].to_string(index=False))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -759,10 +797,17 @@ def parse_args() -> argparse.Namespace:
             "bayes",
             "evaluate",
             "optimize",
+            "generalize",
+            "ablate",
         ],
         help="Workflow step to run. Defaults to all.",
     )
     parser.add_argument("--data", default=str(DEFAULT_DATA), help="Path to framingham.csv.")
+    parser.add_argument(
+        "--data-dir",
+        default=str(DEFAULT_DATA_DIR),
+        help="Directory containing all local CSV datasets.",
+    )
     parser.add_argument("--outputs", default=str(DEFAULT_OUTPUTS), help="Output directory.")
     parser.add_argument("--draws", type=int, default=3000, help="Posterior draws per chain.")
     parser.add_argument("--tune", type=int, default=2000, help="NUTS tuning steps per chain.")
@@ -809,12 +854,45 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bo-iter", type=int, default=30)
     parser.add_argument("--bo-candidates", type=int, default=2000)
     parser.add_argument("--policy-test-size", type=float, default=0.5)
+    parser.add_argument(
+        "--skip-generalization",
+        action="store_true",
+        help="For `all`, skip cross-dataset generalization experiments.",
+    )
+    parser.add_argument(
+        "--generalization-datasets",
+        default=",".join(DEFAULT_GENERALIZATION_DATASETS),
+        help="Comma-separated dataset names for `generalize`/`ablate`.",
+    )
+    parser.add_argument("--generalization-bootstrap-samples", type=int, default=40)
+    parser.add_argument("--generalization-test-size", type=float, default=0.35)
+    parser.add_argument(
+        "--generalization-max-rows",
+        type=int,
+        default=None,
+        help="Optional row cap for every generalization dataset.",
+    )
+    parser.add_argument("--generalization-bo-initial", type=int, default=8)
+    parser.add_argument("--generalization-bo-iter", type=int, default=15)
+    parser.add_argument("--generalization-bo-candidates", type=int, default=1000)
+    parser.add_argument(
+        "--no-transfer-initialization",
+        action="store_true",
+        help="Disable cross-dataset transfer initialization for BO.",
+    )
+    parser.add_argument(
+        "--max-transfer-points",
+        type=int,
+        default=3,
+        help="Maximum prior best policies to seed into the next dataset's BO search.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     data_path = resolve_path(args.data)
+    data_dir = resolve_path(args.data_dir)
     output_dir = resolve_path(args.outputs)
 
     if args.step == "eda":
@@ -829,6 +907,8 @@ def main() -> None:
         run_evaluate(data_path, output_dir, args)
     elif args.step == "optimize":
         run_optimize(data_path, output_dir, args)
+    elif args.step in {"generalize", "ablate"}:
+        run_generalize(data_dir, output_dir, args)
     else:
         run_eda(data_path, output_dir)
         run_preprocess(data_path, output_dir)
@@ -839,6 +919,10 @@ def main() -> None:
             run_bayes(data_path, output_dir, args)
             run_evaluate(data_path, output_dir, args)
             run_optimize(data_path, output_dir, args)
+        if args.skip_generalization:
+            print("[all] Skipping generalization because --skip-generalization was set.")
+        else:
+            run_generalize(data_dir, output_dir, args)
 
 
 if __name__ == "__main__":

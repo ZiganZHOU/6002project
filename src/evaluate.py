@@ -171,6 +171,42 @@ def threshold_cost_curve(y_true, y_pred_prob, c_fp: float = 1.0, c_fn: float = 5
     return pd.DataFrame(rows)
 
 
+def binary_decision_metrics(
+    y_true,
+    y_pred_prob,
+    c_fp: float = 1.0,
+    c_fn: float = 5.0,
+    threshold: float | None = None,
+) -> dict:
+    """Summarize a forced low/high decision rule under asymmetric costs."""
+    if threshold is None:
+        threshold = expected_loss_threshold(c_fp, c_fn)
+
+    y_true = np.asarray(y_true).astype(int)
+    y_pred_prob = np.asarray(y_pred_prob)
+    y_pred = (y_pred_prob >= threshold).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+    total_cost = c_fp * fp + c_fn * fn
+    sensitivity = tp / (tp + fn) if (tp + fn) else np.nan
+    specificity = tn / (tn + fp) if (tn + fp) else np.nan
+    precision = tp / (tp + fp) if (tp + fp) else np.nan
+
+    return {
+        "n": int(len(y_true)),
+        "threshold": float(threshold),
+        "tn": int(tn),
+        "fp": int(fp),
+        "fn": int(fn),
+        "tp": int(tp),
+        "total_cost": float(total_cost),
+        "average_cost": float(total_cost / len(y_true)),
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "sensitivity": sensitivity,
+        "specificity": specificity,
+        "precision": precision,
+    }
+
+
 def posterior_expected_loss_triage(
     p_samples,
     c_fp: float = 1.0,
@@ -297,6 +333,9 @@ def bayesian_optimize_triage_policy(
     n_iter: int = 30,
     random_state: int = 42,
     n_candidates: int = 2000,
+    acquisition_kappa_start: float = 2.5,
+    acquisition_kappa_end: float = 0.5,
+    initial_points=None,
 ):
     """
     Calibrate triage-policy parameters with Gaussian-process Bayesian optimization.
@@ -306,7 +345,10 @@ def bayesian_optimize_triage_policy(
     optional abstention-rate penalty. The objective is a gray-box policy score:
     its cost structure is explicit, but the realized value depends on discrete
     low/high/refer decisions over held-out patients. MCMC is not repeated;
-    optimization uses saved posterior risk samples.
+    optimization uses saved posterior risk samples. Optional initial points can
+    seed the search with policies transferred from previous tasks. The
+    lower-confidence-bound exploration weight decays across iterations, so early
+    trials explore broadly and later trials focus more on exploitation.
     """
     import pandas as pd
     import warnings
@@ -331,6 +373,17 @@ def bayesian_optimize_triage_policy(
         unit = rng.random((n_rows, bounds.shape[0]))
         return bounds[:, 0] + unit * (bounds[:, 1] - bounds[:, 0])
 
+    def sanitize_initial_points(points) -> np.ndarray:
+        if points is None:
+            return np.empty((0, bounds.shape[0]), dtype=float)
+        arr = np.asarray(points, dtype=float)
+        if arr.size == 0:
+            return np.empty((0, bounds.shape[0]), dtype=float)
+        arr = arr.reshape(-1, bounds.shape[0])
+        in_bounds = np.all((arr >= bounds[:, 0]) & (arr <= bounds[:, 1]), axis=1)
+        ordered = arr[:, 0] < arr[:, 1]
+        return arr[in_bounds & ordered]
+
     def objective(theta: np.ndarray) -> tuple[float, dict]:
         q_low, q_high, c_ref_decision = theta
         triage = posterior_expected_loss_triage(
@@ -351,10 +404,20 @@ def bayesian_optimize_triage_policy(
         score = metrics["average_cost"] + abstention_penalty * metrics["referral_rate"]
         return float(score), metrics
 
-    X_obs = sample_params(n_initial)
+    transfer_points = sanitize_initial_points(initial_points)
+    if len(transfer_points) >= n_initial:
+        X_obs = transfer_points[:n_initial]
+        initial_sources = ["transfer"] * n_initial
+    else:
+        n_random = n_initial - len(transfer_points)
+        random_points = sample_params(n_random)
+        X_obs = np.vstack([transfer_points, random_points])
+        initial_sources = ["transfer"] * len(transfer_points) + [
+            "random_initial"
+        ] * n_random
     rows = []
     y_obs = []
-    for iteration, theta in enumerate(X_obs):
+    for iteration, (theta, source) in enumerate(zip(X_obs, initial_sources)):
         score, metrics = objective(theta)
         y_obs.append(score)
         rows.append(
@@ -363,6 +426,8 @@ def bayesian_optimize_triage_policy(
                 "q_low": theta[0],
                 "q_high": theta[1],
                 "decision_referral_cost": theta[2],
+                "candidate_source": source,
+                "acquisition_kappa": np.nan,
                 "objective": score,
                 **metrics,
             }
@@ -390,7 +455,14 @@ def bayesian_optimize_triage_policy(
 
         candidates = sample_params(n_candidates)
         mean, std = gp.predict(candidates, return_std=True)
-        acquisition = mean - 1.96 * std
+        if n_iter <= 1:
+            kappa = acquisition_kappa_end
+        else:
+            frac = step / (n_iter - 1)
+            kappa = acquisition_kappa_start + frac * (
+                acquisition_kappa_end - acquisition_kappa_start
+            )
+        acquisition = mean - kappa * std
         theta = candidates[int(np.argmin(acquisition))]
 
         score, metrics = objective(theta)
@@ -402,7 +474,71 @@ def bayesian_optimize_triage_policy(
                 "q_low": theta[0],
                 "q_high": theta[1],
                 "decision_referral_cost": theta[2],
+                "candidate_source": "bo_acquisition",
+                "acquisition_kappa": kappa,
                 "objective": score,
+                **metrics,
+            }
+        )
+
+    history = pd.DataFrame(rows)
+    best = history.loc[history["objective"].idxmin()].to_dict()
+    return best, history
+
+
+def random_search_triage_policy(
+    p_samples,
+    y_true,
+    c_fp: float = 1.0,
+    c_fn: float = 5.0,
+    eval_c_ref: float = 0.75,
+    abstention_penalty: float = 0.1,
+    n_trials: int = 42,
+    random_state: int = 42,
+):
+    """Random-search baseline over the same triage-policy parameter space."""
+    import pandas as pd
+
+    rng = np.random.default_rng(random_state)
+    p_samples = np.asarray(p_samples)
+    y_true = np.asarray(y_true).astype(int)
+    bounds = np.array(
+        [
+            [0.01, 0.40],
+            [0.60, 0.99],
+            [0.20, 2.00],
+        ],
+        dtype=float,
+    )
+    unit = rng.random((n_trials, bounds.shape[0]))
+    params = bounds[:, 0] + unit * (bounds[:, 1] - bounds[:, 0])
+
+    rows = []
+    for iteration, theta in enumerate(params):
+        q_low, q_high, c_ref_decision = theta
+        triage = posterior_expected_loss_triage(
+            p_samples,
+            c_fp=c_fp,
+            c_fn=c_fn,
+            c_ref=c_ref_decision,
+            q_low=q_low,
+            q_high=q_high,
+        )
+        metrics = triage_metrics(
+            y_true,
+            triage,
+            c_fp=c_fp,
+            c_fn=c_fn,
+            c_ref=eval_c_ref,
+        )
+        score = metrics["average_cost"] + abstention_penalty * metrics["referral_rate"]
+        rows.append(
+            {
+                "iteration": iteration,
+                "q_low": q_low,
+                "q_high": q_high,
+                "decision_referral_cost": c_ref_decision,
+                "objective": float(score),
                 **metrics,
             }
         )
